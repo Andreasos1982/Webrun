@@ -2,6 +2,7 @@ import type {
   AppendMessageRequest,
   CreateJobRequest,
   EventsResponse,
+  FolderBrowserResponse,
   JobRecord,
   JobsResponse,
   LogsResponse,
@@ -65,10 +66,26 @@ export function appendMessage(jobId: string, payload: AppendMessageRequest): Pro
   });
 }
 
+export function cancelJob(jobId: string): Promise<JobRecord> {
+  return request<JobRecord>(`/jobs/${jobId}/cancel`, {
+    method: "POST",
+  });
+}
+
 export function fetchLogs(jobId: string, offset: number): Promise<LogsResponse> {
   return request<LogsResponse>(`/jobs/${jobId}/logs?offset=${offset}`);
 }
 
 export function fetchEvents(jobId: string, offset: number): Promise<EventsResponse> {
   return request<EventsResponse>(`/jobs/${jobId}/events?offset=${offset}`);
+}
+
+export function fetchFolders(path = "."): Promise<FolderBrowserResponse> {
+  return request<FolderBrowserResponse>(`/folders?path=${encodeURIComponent(path)}`);
+}
+
+export function jobStreamUrl(jobId: string): string {
+  const base = new URL(`${API_BASE.replace(/\/$/, "")}/ws/jobs/${jobId}`, window.location.href);
+  base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
+  return base.toString();
 }

@@ -1,5 +1,5 @@
 export type JobMode = "read-only" | "workspace-write";
-export type JobStatus = "queued" | "running" | "succeeded" | "failed";
+export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type WorkspaceWriteStrategy = "disabled" | "workspace-write" | "danger-full-access";
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 export type MessageRole = "user" | "assistant";
@@ -23,6 +23,8 @@ export interface JobRecord {
   mode: JobMode;
   model: string;
   reasoning_effort: ReasoningEffort;
+  open_folder: string;
+  limit_to_open_folder: boolean;
   status: JobStatus;
   cwd: string;
   executor: string;
@@ -36,6 +38,11 @@ export interface JobRecord {
   return_code: number | null;
   worker_pid: number | null;
   thread_id: string | null;
+  thread_mode: JobMode | null;
+  thread_cwd: string | null;
+  thread_open_folder: string | null;
+  thread_limit_to_open_folder: boolean | null;
+  cancel_requested_at: string | null;
   turn_count: number;
   messages: ConversationMessage[];
   changed_files: string[];
@@ -50,6 +57,8 @@ export interface CreateJobRequest {
   mode: JobMode;
   model: string;
   reasoning_effort: ReasoningEffort;
+  open_folder: string;
+  limit_to_open_folder: boolean;
 }
 
 export interface AppendMessageRequest {
@@ -57,6 +66,8 @@ export interface AppendMessageRequest {
   mode: JobMode;
   model: string;
   reasoning_effort: ReasoningEffort;
+  open_folder: string;
+  limit_to_open_folder: boolean;
 }
 
 export interface LogsResponse {
@@ -99,11 +110,26 @@ export interface ReasoningEffortOption {
   description: string;
 }
 
+export interface FolderEntry {
+  name: string;
+  path: string;
+  has_children: boolean;
+}
+
+export interface FolderBrowserResponse {
+  root: string;
+  current_path: string;
+  parent_path: string | null;
+  entries: FolderEntry[];
+}
+
 export interface RuntimeInfo {
   status: string;
   workspace_root: string;
   codex_bin: string;
   workspace_write_strategy: WorkspaceWriteStrategy;
+  supports_websocket_streams: boolean;
+  supports_native_thread_resume: boolean;
   default_model: string;
   default_reasoning_effort: ReasoningEffort;
   available_models: ModelOption[];
