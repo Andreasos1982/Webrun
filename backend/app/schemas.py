@@ -10,6 +10,8 @@ class JobInputRequest(BaseModel):
     mode: JobMode = JobMode.read_only
     model: str = Field(default="gpt-5.4", min_length=1, max_length=120)
     reasoning_effort: ReasoningEffort = ReasoningEffort.xhigh
+    open_folder: str = Field(default=".", max_length=400)
+    limit_to_open_folder: bool = False
 
     @field_validator("prompt")
     @classmethod
@@ -26,6 +28,14 @@ class JobInputRequest(BaseModel):
         if not model:
             raise ValueError("Model cannot be empty.")
         return model
+
+    @field_validator("open_folder")
+    @classmethod
+    def normalize_open_folder(cls, value: str) -> str:
+        folder = value.strip()
+        if not folder or folder == "/":
+            return "."
+        return folder
 
 
 class CreateJobRequest(JobInputRequest):
@@ -48,6 +58,8 @@ class JobStatusResponse(BaseModel):
     return_code: int | None
     worker_pid: int | None
     thread_id: str | None
+    open_folder: str
+    limit_to_open_folder: bool
 
 
 class LogsResponse(BaseModel):
@@ -94,11 +106,26 @@ class ReasoningEffortOptionResponse(BaseModel):
     description: str
 
 
+class FolderEntryResponse(BaseModel):
+    name: str
+    path: str
+    has_children: bool
+
+
+class FolderBrowserResponse(BaseModel):
+    root: str
+    current_path: str
+    parent_path: str | None
+    entries: list[FolderEntryResponse]
+
+
 class RuntimeInfoResponse(BaseModel):
     status: str
     workspace_root: str
     codex_bin: str
     workspace_write_strategy: WorkspaceWriteStrategy
+    supports_websocket_streams: bool
+    supports_native_thread_resume: bool
     default_model: str
     default_reasoning_effort: ReasoningEffort
     available_models: list[ModelOptionResponse]

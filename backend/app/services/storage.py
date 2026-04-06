@@ -33,6 +33,8 @@ class JobStore:
         cwd: str,
         model: str,
         reasoning_effort: ReasoningEffort,
+        open_folder: str,
+        limit_to_open_folder: bool,
     ) -> JobRecord:
         now = utc_now()
         normalized_prompt = prompt.strip()
@@ -53,6 +55,8 @@ class JobStore:
             mode=mode,
             model=model,
             reasoning_effort=reasoning_effort,
+            open_folder=open_folder,
+            limit_to_open_folder=limit_to_open_folder,
             status=JobStatus.queued,
             cwd=cwd,
             created_at=now,
@@ -75,6 +79,9 @@ class JobStore:
         mode: JobMode,
         model: str,
         reasoning_effort: ReasoningEffort,
+        cwd: str,
+        open_folder: str,
+        limit_to_open_folder: bool,
     ) -> JobRecord:
         with self._lock:
             path = self._job_dir(job_id) / "job.json"
@@ -91,12 +98,16 @@ class JobStore:
             job.mode = mode
             job.model = model
             job.reasoning_effort = reasoning_effort
+            job.cwd = cwd
+            job.open_folder = open_folder
+            job.limit_to_open_folder = limit_to_open_folder
             job.status = JobStatus.queued
             job.error = None
             job.return_code = None
             job.worker_pid = None
             job.started_at = None
             job.finished_at = None
+            job.cancel_requested_at = None
             job.executor = "pending"
             job.command = []
             job.final_output = None
@@ -117,6 +128,28 @@ class JobStore:
             self._write_job_unlocked(job)
             return job
 
+    def request_cancel(self, job_id: str) -> JobRecord:
+        with self._lock:
+            path = self._job_dir(job_id) / "job.json"
+            if not path.exists():
+                raise HTTPException(status_code=404, detail="Job not found.")
+
+            job = self._read_job_file(path)
+            if job.status in {JobStatus.succeeded, JobStatus.failed, JobStatus.cancelled}:
+                return job
+
+            now = utc_now()
+            job.cancel_requested_at = now
+            job.updated_at = now
+
+            if job.status == JobStatus.queued and job.worker_pid is None:
+                job.status = JobStatus.cancelled
+                job.finished_at = now
+                job.error = None
+
+            self._write_job_unlocked(job)
+            return job
+
     def list_jobs(self) -> list[JobRecord]:
         jobs: list[JobRecord] = []
         for path in self.jobs_root.iterdir():
@@ -125,7 +158,7 @@ class JobStore:
             job_file = path / "job.json"
             if job_file.exists():
                 jobs.append(self._reconcile_job(self._read_job_file(job_file)))
-        return sorted(jobs, key=lambda item: item.created_at, reverse=True)
+        return sorted(jobs, key=lambda item: item.updated_at, reverse=True)
 
     def get_job(self, job_id: str) -> JobRecord:
         job_file = self._job_dir(job_id) / "job.json"
@@ -188,6 +221,18 @@ class JobStore:
             job.title = self._build_title(job.prompt)
             updated = True
 
+        if not job.open_folder:
+            job.open_folder = "."
+            updated = True
+
+        if job.thread_open_folder is None and job.thread_id:
+            job.thread_open_folder = job.open_folder
+            updated = True
+
+        if job.thread_limit_to_open_folder is None and job.thread_id:
+            job.thread_limit_to_open_folder = job.limit_to_open_folder
+            updated = True
+
         if not job.messages and job.prompt:
             job.messages.append(
                 ConversationMessage(
@@ -228,6 +273,13 @@ class JobStore:
             return job
 
         if job.status == JobStatus.queued and job.worker_pid is None:
+            if job.cancel_requested_at:
+                job.status = JobStatus.cancelled
+                job.error = None
+                job.finished_at = utc_now()
+                job.updated_at = job.finished_at
+                self.save_job(job)
+                return job
             queue_reference = job.updated_at or job.created_at
             age_seconds = (datetime.now(timezone.utc) - parse_utc(queue_reference)).total_seconds()
             if age_seconds >= 15:
@@ -239,8 +291,12 @@ class JobStore:
             return job
 
         if job.worker_pid and job.status in {JobStatus.queued, JobStatus.running} and not self._pid_exists(job.worker_pid):
-            job.status = JobStatus.failed
-            job.error = job.error or "Job worker stopped before reporting completion."
+            if job.cancel_requested_at:
+                job.status = JobStatus.cancelled
+                job.error = None
+            else:
+                job.status = JobStatus.failed
+                job.error = job.error or "Job worker stopped before reporting completion."
             job.finished_at = utc_now()
             job.updated_at = job.finished_at
             self.save_job(job)

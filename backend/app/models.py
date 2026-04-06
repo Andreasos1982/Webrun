@@ -16,6 +16,7 @@ class JobStatus(str, Enum):
     running = "running"
     succeeded = "succeeded"
     failed = "failed"
+    cancelled = "cancelled"
 
 
 class WorkspaceWriteStrategy(str, Enum):
@@ -55,6 +56,8 @@ class JobRecord(BaseModel):
     mode: JobMode
     model: str = "gpt-5.4"
     reasoning_effort: ReasoningEffort = ReasoningEffort.xhigh
+    open_folder: str = "."
+    limit_to_open_folder: bool = False
     status: JobStatus
     cwd: str
     executor: str = "pending"
@@ -68,6 +71,11 @@ class JobRecord(BaseModel):
     return_code: int | None = None
     worker_pid: int | None = None
     thread_id: str | None = None
+    thread_mode: JobMode | None = None
+    thread_cwd: str | None = None
+    thread_open_folder: str | None = None
+    thread_limit_to_open_folder: bool | None = None
+    cancel_requested_at: str | None = None
     turn_count: int = 0
     messages: list[ConversationMessage] = Field(default_factory=list)
     changed_files: list[str] = Field(default_factory=list)

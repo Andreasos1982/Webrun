@@ -5,12 +5,21 @@ import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import subprocess
 import sys
+from typing import Literal
 
 from .config import get_settings
 from .models import ConversationMessage, JobRecord, JobStatus, MessageRole
-from .services.modes import ModeSpec, build_exec_command, get_mode_spec
+from .services.modes import (
+    ModeSpec,
+    build_exec_command,
+    build_resume_command,
+    build_review_command,
+    get_mode_spec,
+    supports_native_resume,
+)
 from .services.snapshot import WorkspaceSnapshotBuilder
 from .services.storage import JobStore, utc_now
 
@@ -23,33 +32,67 @@ class RenderedEvent:
     thread_id: str | None = None
 
 
+@dataclass(frozen=True)
+class ParsedTurn:
+    kind: Literal["chat", "review", "status", "local", "cloud"]
+    prompt: str
+
+
 class JobWorker:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.store = JobStore(self.settings.jobs_root)
-        self.snapshot_builder = WorkspaceSnapshotBuilder(self.settings.workspace_root)
+        self._active_process: subprocess.Popen[str] | None = None
+        self._cancel_requested = False
+        self._current_job_id: str | None = None
 
     def run(self, job_id: str) -> None:
+        self._current_job_id = job_id
+        self._install_signal_handlers()
+
         job = self.store.get_job(job_id)
         mode_spec = get_mode_spec(self.settings, job.mode)
         current_turn = job.turn_count
+
+        if job.cancel_requested_at:
+            self._mark_cancelled(job, "Cancellation was requested before the turn started.")
+            return
 
         if not mode_spec.enabled:
             self._fail_job(job, mode_spec.reason or f"Job mode {job.mode.value} is not available.")
             return
 
+        latest_user_message = next((message for message in reversed(job.messages) if message.role == MessageRole.user), None)
+        if latest_user_message is None:
+            self._fail_job(job, "No user message was found for this turn.")
+            return
+
+        parsed_turn = self._parse_turn(latest_user_message.content)
+        should_resume = self._should_resume_natively(job, mode_spec, parsed_turn.kind)
+
+        if parsed_turn.kind == "status":
+            self._complete_status_turn(job, current_turn=current_turn)
+            return
+
+        if parsed_turn.kind in {"local", "cloud"}:
+            self._complete_route_turn(job, current_turn=current_turn, route=parsed_turn.kind)
+            return
+
+        command = self._build_command(job, parsed_turn, should_resume)
+        if not command:
+            self._fail_job(job, "Unable to prepare a Codex command for this turn on this host.")
+            return
+
+        executor = self._executor_name(mode_spec, parsed_turn.kind, should_resume)
+
         job.status = JobStatus.running
-        job.executor = mode_spec.executor
-        job.command = build_exec_command(
-            self.settings,
-            job.mode,
-            model=job.model,
-            reasoning_effort=job.reasoning_effort,
-        )
+        job.executor = executor
+        job.command = command
         job.worker_pid = os.getpid()
         job.started_at = utc_now()
         job.finished_at = None
         job.error = None
+        job.return_code = None
         job.updated_at = job.started_at
         self.store.save_job(job)
 
@@ -57,34 +100,154 @@ class JobWorker:
         self.store.append_log(job.id, f"[system] Mode: {job.mode.value}")
         self.store.append_log(job.id, f"[system] Model: {job.model}")
         self.store.append_log(job.id, f"[system] Reasoning: {job.reasoning_effort.value}")
+        self.store.append_log(job.id, f"[system] Open folder: {job.open_folder}")
         self.store.append_log(job.id, f"[system] Workspace: {job.cwd}")
         self.store.append_log(job.id, f"[system] Worker PID: {job.worker_pid}")
-        self.store.append_log(job.id, f"[system] Executor: {mode_spec.executor}")
+        self.store.append_log(job.id, f"[system] Executor: {executor}")
         if mode_spec.dangerous:
             self.store.append_log(
                 job.id,
                 "[warning] Live write mode is running without the native Codex sandbox on this host.",
             )
-
-        latest_user_message = next((message for message in reversed(job.messages) if message.role == MessageRole.user), None)
-        if latest_user_message:
-            self.store.append_log(job.id, f"[user] {latest_user_message.content}")
+        if should_resume and job.thread_id:
+            self.store.append_log(job.id, f"[system] Resuming native Codex thread: {job.thread_id}")
+        elif job.thread_id:
+            self.store.append_log(
+                job.id,
+                "[system] Starting a fresh Codex thread because the workspace scope or mode changed.",
+            )
+        self.store.append_log(job.id, f"[user] {latest_user_message.content}")
 
         try:
-            prompt = self._build_prompt(job, mode_spec)
-            self._run_codex(job, prompt, current_turn=current_turn)
+            prompt = self._build_prompt(job, mode_spec, parsed_turn, should_resume)
+            self._run_codex(
+                job,
+                prompt,
+                current_turn=current_turn,
+                allow_thread_update=parsed_turn.kind == "chat" and not should_resume,
+            )
         except FileNotFoundError:
             self._fail_job(job, "The `codex` CLI was not found on this machine.")
         except Exception as exc:  # noqa: BLE001
             self._fail_job(job, f"Job failed unexpectedly: {exc}")
 
-    def _build_prompt(self, job: JobRecord, mode_spec: ModeSpec) -> str:
+    def _install_signal_handlers(self) -> None:
+        signal.signal(signal.SIGTERM, self._handle_cancel_signal)
+        signal.signal(signal.SIGINT, self._handle_cancel_signal)
+
+    def _handle_cancel_signal(self, signum: int, _frame: object) -> None:
+        self._cancel_requested = True
+        if self._current_job_id:
+            self.store.append_log(self._current_job_id, f"[system] Cancellation signal received ({signum})")
+        if self._active_process and self._active_process.poll() is None:
+            self._active_process.terminate()
+
+    def _parse_turn(self, content: str) -> ParsedTurn:
+        stripped = content.strip()
+        if not stripped.startswith("/"):
+            return ParsedTurn(kind="chat", prompt=stripped)
+
+        command, _, remainder = stripped.partition(" ")
+        payload = remainder.strip()
+
+        if command == "/status":
+            return ParsedTurn(kind="status", prompt=payload)
+        if command == "/local":
+            return ParsedTurn(kind="local", prompt=payload)
+        if command == "/cloud":
+            return ParsedTurn(kind="cloud", prompt=payload)
+        if command == "/review":
+            return ParsedTurn(kind="review", prompt=payload or "Review the current changes and report the key findings.")
+        return ParsedTurn(kind="chat", prompt=stripped)
+
+    def _should_resume_natively(self, job: JobRecord, mode_spec: ModeSpec, turn_kind: str) -> bool:
+        if turn_kind != "chat":
+            return False
+        if not job.thread_id:
+            return False
+        if job.thread_mode and job.thread_mode != job.mode:
+            return False
+        if job.thread_cwd and job.thread_cwd != job.cwd:
+            return False
+        if job.thread_open_folder and job.thread_open_folder != job.open_folder:
+            return False
+        if (
+            job.thread_limit_to_open_folder is not None
+            and job.thread_limit_to_open_folder != job.limit_to_open_folder
+        ):
+            return False
+        return supports_native_resume(self.settings, mode_spec.mode)
+
+    def _build_command(self, job: JobRecord, parsed_turn: ParsedTurn, should_resume: bool) -> list[str]:
+        if parsed_turn.kind == "status":
+            return []
+        if parsed_turn.kind in {"local", "cloud"}:
+            return []
+        if parsed_turn.kind == "review":
+            return build_review_command(
+                self.settings,
+                job.mode,
+                model=job.model,
+                reasoning_effort=job.reasoning_effort,
+            )
+        if should_resume and job.thread_id:
+            resume_command = build_resume_command(
+                self.settings,
+                job.mode,
+                model=job.model,
+                reasoning_effort=job.reasoning_effort,
+                thread_id=job.thread_id,
+            )
+            if resume_command:
+                return resume_command
+        return build_exec_command(
+            self.settings,
+            job.mode,
+            model=job.model,
+            reasoning_effort=job.reasoning_effort,
+        )
+
+    def _executor_name(self, mode_spec: ModeSpec, turn_kind: str, should_resume: bool) -> str:
+        if turn_kind == "review":
+            return "codex-review"
+        if turn_kind in {"local", "cloud"}:
+            return f"session-{turn_kind}"
+        if should_resume:
+            return f"{mode_spec.executor}-resume"
+        return mode_spec.executor
+
+    def _build_prompt(self, job: JobRecord, mode_spec: ModeSpec, parsed_turn: ParsedTurn, should_resume: bool) -> str:
+        latest_request = parsed_turn.prompt
         transcript = self._render_transcript(job)
+        open_folder_line = f"Open folder: {job.open_folder} ({job.cwd})"
+        folder_guardrail = ""
+        if job.limit_to_open_folder:
+            folder_guardrail = (
+                "Treat the open folder as the only allowed work area. "
+                "Do not read or write outside it unless the user explicitly changes scope.\n"
+            )
+
+        if parsed_turn.kind == "review":
+            return (
+                f"{open_folder_line}\n"
+                f"{folder_guardrail}"
+                "Focus on behavioral regressions, risks, and missing tests. Keep findings first.\n\n"
+                f"Custom review instructions:\n{latest_request}\n"
+            )
 
         if mode_spec.launch_strategy == "snapshot":
-            snapshot = self.snapshot_builder.build(job.prompt)
+            snapshot = WorkspaceSnapshotBuilder(Path(job.cwd)).build(latest_request)
             self.store.append_log(job.id, "[system] Built bounded workspace snapshot")
             self.store.append_log(job.id, f"[system] Snapshot characters: {len(snapshot)}")
+            if should_resume:
+                return (
+                    "Continue the existing Codex session.\n"
+                    "This turn remains strict read-only.\n"
+                    f"{open_folder_line}\n"
+                    "Use only the snapshot below.\n\n"
+                    f"User request:\n{latest_request}\n\n"
+                    f"Workspace snapshot:\n{snapshot}\n"
+                )
             return (
                 "You are Codex running inside a browser-based VPS runner.\n"
                 "You are continuing a chat-style coding conversation.\n"
@@ -92,6 +255,7 @@ class JobWorker:
                 "Do not call shell tools, MCP tools, or web search.\n"
                 "Answer only from the workspace snapshot below and the conversation transcript.\n"
                 "If the snapshot is insufficient, say exactly what is missing.\n\n"
+                f"{open_folder_line}\n\n"
                 f"Session transcript:\n{transcript}\n\n"
                 f"Workspace snapshot:\n{snapshot}\n"
             )
@@ -100,16 +264,31 @@ class JobWorker:
             job.id,
             "[system] Live workspace mode enabled: Codex may inspect the repository directly.",
         )
+        if should_resume:
+            return (
+                "Continue the existing Codex session.\n"
+                f"{open_folder_line}\n"
+                f"{folder_guardrail}"
+                f"User request:\n{latest_request}\n"
+            )
         return (
             "You are Codex running inside a browser-based VPS runner.\n"
             "You are continuing a chat-style coding conversation.\n"
             "You may inspect and edit files in the live workspace when necessary.\n"
             "Stay focused on the user's latest request, keep changes minimal and deliberate, and summarize what you changed.\n"
             "Do not assume browser state is persistent; job logs and final output are surfaced in a web UI.\n\n"
+            f"{open_folder_line}\n"
+            f"{folder_guardrail}\n"
             f"Session transcript:\n{transcript}\n"
         )
 
-    def _run_codex(self, job: JobRecord, prompt: str, current_turn: int) -> None:
+    def _run_codex(
+        self,
+        job: JobRecord,
+        prompt: str,
+        current_turn: int,
+        allow_thread_update: bool,
+    ) -> None:
         self.store.append_log(job.id, f"[system] Launching: {shlex.join(job.command)}")
 
         process = subprocess.Popen(
@@ -121,6 +300,7 @@ class JobWorker:
             text=True,
             bufsize=1,
         )
+        self._active_process = process
 
         assert process.stdin is not None
         process.stdin.write(prompt)
@@ -145,13 +325,28 @@ class JobWorker:
                 thread_id = rendered.thread_id
 
         return_code = process.wait()
+        self._active_process = None
+
         completed_job = self.store.get_job(job.id)
         completed_job.return_code = return_code
         completed_job.finished_at = utc_now()
         completed_job.updated_at = completed_job.finished_at
         completed_job.final_output = final_output
         completed_job.changed_files = sorted(changed_files)
-        completed_job.thread_id = thread_id or completed_job.thread_id
+
+        if self._cancel_requested or completed_job.cancel_requested_at:
+            completed_job.status = JobStatus.cancelled
+            completed_job.error = None
+            self.store.append_log(job.id, "[system] Turn cancelled")
+            self.store.save_job(completed_job)
+            return
+
+        if allow_thread_update:
+            completed_job.thread_id = thread_id or completed_job.thread_id
+            completed_job.thread_mode = completed_job.mode
+            completed_job.thread_cwd = completed_job.cwd
+            completed_job.thread_open_folder = completed_job.open_folder
+            completed_job.thread_limit_to_open_folder = completed_job.limit_to_open_folder
 
         if return_code == 0:
             completed_job.status = JobStatus.succeeded
@@ -176,6 +371,89 @@ class JobWorker:
             self.store.append_log(job.id, f"[error] {completed_job.error}")
 
         self.store.save_job(completed_job)
+
+    def _complete_status_turn(self, job: JobRecord, current_turn: int) -> None:
+        latest_output = job.final_output or "No assistant output has been recorded yet."
+        summary = (
+            f"Session `{job.id}` is currently using `{job.model}` with `{job.reasoning_effort.value}` reasoning in "
+            f"`{job.mode.value}` mode. Open folder: `{job.open_folder}`. "
+            f"Native thread: `{job.thread_id or 'not started yet'}`. "
+            f"Previous executor: `{job.executor}`. Last output: {latest_output}"
+        )
+
+        completed_job = self.store.get_job(job.id)
+        completed_job.status = JobStatus.succeeded
+        completed_job.executor = "session-status"
+        completed_job.command = []
+        completed_job.worker_pid = os.getpid()
+        completed_job.started_at = utc_now()
+        completed_job.finished_at = completed_job.started_at
+        completed_job.updated_at = completed_job.started_at
+        completed_job.final_output = summary
+        completed_job.return_code = 0
+        completed_job.error = None
+        completed_job.messages.append(
+            ConversationMessage(
+                id=os.urandom(8).hex(),
+                role=MessageRole.assistant,
+                content=summary,
+                created_at=completed_job.finished_at,
+                turn=current_turn,
+                mode=completed_job.mode,
+                model=completed_job.model,
+                reasoning_effort=completed_job.reasoning_effort,
+            )
+        )
+        self.store.save_job(completed_job)
+        self.store.append_log(job.id, "[system] Rendered synthetic /status response")
+
+    def _complete_route_turn(self, job: JobRecord, current_turn: int, route: Literal["local", "cloud"]) -> None:
+        if route == "local":
+            summary = (
+                "WebRun already executes locally on this VPS. "
+                f"The current session stays in `{job.mode.value}` mode with open folder `{job.open_folder}`."
+            )
+        else:
+            summary = (
+                "Cloud delegation is not implemented in WebRun yet. "
+                "Stay on the local VPS runner for now, or add a cloud-backed execution path as a future mode."
+            )
+
+        completed_job = self.store.get_job(job.id)
+        completed_job.status = JobStatus.succeeded
+        completed_job.executor = f"session-{route}"
+        completed_job.command = []
+        completed_job.worker_pid = os.getpid()
+        completed_job.started_at = utc_now()
+        completed_job.finished_at = completed_job.started_at
+        completed_job.updated_at = completed_job.started_at
+        completed_job.final_output = summary
+        completed_job.return_code = 0
+        completed_job.error = None
+        completed_job.messages.append(
+            ConversationMessage(
+                id=os.urandom(8).hex(),
+                role=MessageRole.assistant,
+                content=summary,
+                created_at=completed_job.finished_at,
+                turn=current_turn,
+                mode=completed_job.mode,
+                model=completed_job.model,
+                reasoning_effort=completed_job.reasoning_effort,
+            )
+        )
+        self.store.save_job(completed_job)
+        self.store.append_log(job.id, f"[system] Rendered synthetic /{route} response")
+
+    def _mark_cancelled(self, job: JobRecord, message: str) -> None:
+        cancelled_job = self.store.get_job(job.id)
+        cancelled_job.status = JobStatus.cancelled
+        cancelled_job.error = None
+        cancelled_job.finished_at = utc_now()
+        cancelled_job.updated_at = cancelled_job.finished_at
+        cancelled_job.return_code = None
+        self.store.save_job(cancelled_job)
+        self.store.append_log(job.id, f"[system] {message}")
 
     def _fail_job(self, job: JobRecord, message: str) -> None:
         failed_job = self.store.get_job(job.id)
@@ -275,8 +553,7 @@ class JobWorker:
                 meta_parts.append(message.reasoning_effort.value)
             if message.mode:
                 meta_parts.append(message.mode.value)
-            meta = ", ".join(meta_parts)
-            blocks.append(f"{speaker} ({meta}):\n{message.content.strip()}")
+            blocks.append(f"{speaker} ({', '.join(meta_parts)}):\n{message.content.strip()}")
         return "\n\n".join(blocks)
 
     def _turn_has_assistant_message(self, job: JobRecord, turn: int) -> bool:

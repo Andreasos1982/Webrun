@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import sys
 
@@ -36,6 +38,15 @@ class JobRunner:
 
     def preview_command(self, mode: JobMode, model: str, reasoning_effort: ReasoningEffort) -> list[str]:
         return build_exec_command(self.settings, mode, model=model, reasoning_effort=reasoning_effort)
+
+    def cancel(self, job_id: str) -> None:
+        job = self.store.get_job(job_id)
+        if not job.worker_pid:
+            return
+        try:
+            os.kill(job.worker_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
 
     def fail_to_start(self, job_id: str, message: str) -> None:
         job = self.store.get_job(job_id)

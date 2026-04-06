@@ -82,6 +82,25 @@ def list_mode_specs(settings: Settings) -> list[ModeSpec]:
     ]
 
 
+def supports_native_resume(settings: Settings, mode: JobMode) -> bool:
+    spec = get_mode_spec(settings, mode)
+    if not spec.enabled:
+        return False
+    if mode == JobMode.read_only:
+        return True
+    return spec.bypass_sandbox
+
+
+def _base_exec_prefix(settings: Settings, model: str, reasoning_effort: ReasoningEffort) -> list[str]:
+    return [
+        settings.codex_bin,
+        "--config",
+        f'model_reasoning_effort="{reasoning_effort.value}"',
+        "--model",
+        model,
+    ]
+
+
 def build_exec_command(
     settings: Settings,
     mode: JobMode,
@@ -109,6 +128,62 @@ def build_exec_command(
         command.append("--dangerously-bypass-approvals-and-sandbox")
     elif spec.sandbox_mode:
         command.extend(["--sandbox", spec.sandbox_mode])
+
+    command.append("-")
+    return command
+
+
+def build_resume_command(
+    settings: Settings,
+    mode: JobMode,
+    model: str,
+    reasoning_effort: ReasoningEffort,
+    thread_id: str,
+) -> list[str]:
+    if not supports_native_resume(settings, mode):
+        return []
+
+    command = [
+        settings.codex_bin,
+        "exec",
+        "resume",
+        "--json",
+        "-m",
+        model,
+        "-c",
+        f'model_reasoning_effort="{reasoning_effort.value}"',
+        "--skip-git-repo-check",
+    ]
+
+    spec = get_mode_spec(settings, mode)
+    if spec.bypass_sandbox:
+        command.append("--dangerously-bypass-approvals-and-sandbox")
+
+    command.extend([thread_id, "-"])
+    return command
+
+
+def build_review_command(
+    settings: Settings,
+    mode: JobMode,
+    model: str,
+    reasoning_effort: ReasoningEffort,
+) -> list[str]:
+    command = [
+        settings.codex_bin,
+        "exec",
+        "review",
+        "--json",
+        "--skip-git-repo-check",
+        "-m",
+        model,
+        "-c",
+        f'model_reasoning_effort="{reasoning_effort.value}"',
+    ]
+
+    spec = get_mode_spec(settings, mode)
+    if spec.bypass_sandbox:
+        command.append("--dangerously-bypass-approvals-and-sandbox")
 
     command.append("-")
     return command
