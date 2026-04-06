@@ -12,29 +12,52 @@ The repo now contains:
 - React + Vite frontend in `frontend/`
 - Detached disk-backed job workers
 - Persistent chat-style sessions with alternating user / Codex messages
+- Native Codex thread capture and resume when mode + workspace scope stay compatible
 - Built frontend served by FastAPI for single-origin production deploys
 - Persistent job metadata under `data/jobs/`
 - Readable logs in `output.log`
 - Raw Codex event capture in `events.jsonl`
-- A VS-Code-like browser surface with session explorer, Codex chat thread, model picker, reasoning picker, access picker, logs, and raw events
+- WebSocket live streaming for the selected session, with polling fallback
+- A VS-Code-workbench-like browser surface with session explorer, workspace console, right-side Codex chat, folder chooser, model picker, reasoning picker, access picker, logs, and raw events
 
 ## Codex-Style Session UX
 
 The browser surface is now organized around a persistent session instead of a single one-off prompt:
 
 - left sidebar for sessions
-- main chat thread with alternating user and Codex messages
+- center workspace console with latest output, file changes, and thread state
+- right-side chat thread with alternating user and Codex messages
 - composer controls for:
   - model
   - reasoning effort
   - access mode
-- bottom panel for logs, raw events, and session details
+- open folder
+- `limit to the open folder`
+- lower panel for logs, raw events, and session details
 
 Why this shape:
 
 - it matches the core interaction style documented for the Codex IDE extension
 - it lets you follow a conversation over multiple turns
 - it keeps per-turn runner settings visible and persistent
+- it keeps the active Codex thread resumable when the mode and folder scope stay aligned
+
+## Native Threads And Slash Commands
+
+`webrun` now maps browser sessions to native Codex threads whenever the current turn can safely resume the existing thread:
+
+- `read-only` sessions resume natively
+- `workspace-write` resumes natively on this VPS because the host uses `danger-full-access`
+- changing mode, open folder, or the `limit to the open folder` scope starts a fresh Codex thread on purpose
+
+Slash-command coverage in the web UI:
+
+- `/status`: synthetic session summary turn
+- `/review`: Codex review turn
+- `/local`: synthetic note that the runner already executes locally on the VPS
+- `/cloud`: synthetic note that cloud delegation is not implemented in `webrun` yet
+
+The quick-action buttons in the composer send these directly into the visible transcript so the browser conversation stays auditable.
 
 ## Job Modes
 
@@ -160,6 +183,11 @@ Default URLs:
 
 In dev, Vite proxies `/api` to `127.0.0.1:8000`, so the frontend can use the same-origin `/api` base that production uses.
 
+The built production frontend also uses the same-origin API base and the same-origin WebSocket endpoint:
+
+- REST: `/api/...`
+- live stream: `/api/ws/jobs/{job_id}`
+
 ## Production On This VPS
 
 The production path on this host is now:
@@ -247,22 +275,37 @@ Optional examples:
 ```bash
 python3 scripts/smoke_api.py --api-base http://127.0.0.1:8000/api
 python3 scripts/smoke_api.py --mode read-only --prompt "Summarize the backend architecture."
-python3 scripts/smoke_api.py --mode workspace-write --prompt "Add a small README note." --follow-up "Now summarize what you changed." --timeout 180
+python3 scripts/smoke_api.py --mode read-only --open-folder frontend --limit-to-open-folder --extra-turn /status
+python3 scripts/smoke_api.py --mode workspace-write --open-folder data/runtime-probes/thread-e2e --limit-to-open-folder --prompt "Create notes.txt with one line: alpha." --follow-up "Append beta to that file." --extra-turn "/review Review the current changes briefly." --timeout 180
 ```
 
 If `workspace-write` is disabled, the smoke script will fail fast with the API error message.
+
+For manual verification in the browser:
+
+- open a session
+- change the model / reasoning effort / access dropdowns
+- choose a folder with `Choose Folder`
+- toggle `Limit to the open folder`
+- start a turn and confirm the chat updates live
+- use `/status` and `/review`
+- cancel a running turn
+- refresh the page and confirm the session transcript, logs, and final state persist
 
 ## API
 
 - `GET /api/health`
 - `GET /api/runtime`
+- `GET /api/folders?path=.`
 - `GET /api/jobs`
 - `POST /api/jobs`
 - `POST /api/jobs/{job_id}/messages`
+- `POST /api/jobs/{job_id}/cancel`
 - `GET /api/jobs/{job_id}`
 - `GET /api/jobs/{job_id}/status`
 - `GET /api/jobs/{job_id}/logs?offset=0`
 - `GET /api/jobs/{job_id}/events?offset=0`
+- `GET /api/ws/jobs/{job_id}`
 
 ## Job Storage
 
@@ -278,7 +321,9 @@ Each job lives under `data/jobs/<job_id>/`:
 - follow-up messages reuse the same disk-backed session record
 - backend launches a detached worker process per turn
 - worker owns the Codex subprocess and all job file writes
+- worker persists the native Codex `thread_id` so compatible follow-ups can use `codex exec resume`
 - browser disconnects do not stop jobs
+- WebSocket clients reconnect safely because job state, logs, and events remain on disk
 - backend restarts no longer depend on an in-process thread to keep the run alive
 - in production, the built frontend is served by the backend so UI and API share one origin
 

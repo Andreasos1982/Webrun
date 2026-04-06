@@ -40,6 +40,22 @@ def main() -> int:
         "--follow-up",
         default="Now answer in one short sentence what the main frontend surface is.",
     )
+    parser.add_argument(
+        "--extra-turn",
+        action="append",
+        default=[],
+        help="Optional extra turn to append after the follow-up. Can be used multiple times, including slash commands like /status.",
+    )
+    parser.add_argument(
+        "--open-folder",
+        default=".",
+        help="Workspace-relative folder to use as the open folder scope.",
+    )
+    parser.add_argument(
+        "--limit-to-open-folder",
+        action="store_true",
+        help="Tell the runner to keep work scoped to the chosen open folder.",
+    )
     parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args()
 
@@ -62,6 +78,8 @@ def main() -> int:
             "mode": args.mode,
             "model": model,
             "reasoning_effort": reasoning_effort,
+            "open_folder": args.open_folder,
+            "limit_to_open_folder": args.limit_to_open_folder,
         },
     )
     job_id = job["id"]
@@ -72,7 +90,7 @@ def main() -> int:
         while time.time() < deadline:
             polled_job = api_request(args.api_base, f"/jobs/{parse.quote(job_id)}")
             print(f"Polling session {job_id}: {polled_job['status']} (turns={polled_job['turn_count']})")
-            if polled_job["status"] in {"succeeded", "failed"}:
+            if polled_job["status"] in {"succeeded", "failed", "cancelled"}:
                 return polled_job
             time.sleep(2)
         raise SystemExit(f"Timed out waiting for session {job_id} to finish.")
@@ -89,9 +107,28 @@ def main() -> int:
                 "mode": args.mode,
                 "model": model,
                 "reasoning_effort": reasoning_effort,
+                "open_folder": args.open_folder,
+                "limit_to_open_folder": args.limit_to_open_folder,
             },
         )
         print(f"Queued follow-up turn: {follow_up_job['turn_count']}")
+        job = wait_for_completion()
+
+    for extra_turn in args.extra_turn:
+        extra_turn_job = api_request(
+            args.api_base,
+            f"/jobs/{parse.quote(job_id)}/messages",
+            method="POST",
+            payload={
+                "prompt": extra_turn,
+                "mode": args.mode,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
+                "open_folder": args.open_folder,
+                "limit_to_open_folder": args.limit_to_open_folder,
+            },
+        )
+        print(f"Queued extra turn: {extra_turn_job['turn_count']} -> {extra_turn}")
         job = wait_for_completion()
 
     logs = api_request(args.api_base, f"/jobs/{parse.quote(job_id)}/logs?offset=0&limit=200000")
@@ -102,6 +139,9 @@ def main() -> int:
     print("Executor:", job["executor"])
     print("Worker PID:", job.get("worker_pid"))
     print("Return code:", job.get("return_code"))
+    print("Thread ID:", job.get("thread_id"))
+    print("Open folder:", job.get("open_folder"))
+    print("Limit scope:", job.get("limit_to_open_folder"))
     print("Messages:", len(job.get("messages") or []))
     print("Turns:", job.get("turn_count"))
     if job.get("changed_files"):
