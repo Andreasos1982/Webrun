@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .models import JobRecord, JobStatus
@@ -31,6 +34,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+frontend_dist_root = settings.frontend_dist_root
+frontend_index_file = frontend_dist_root / "index.html"
 
 
 @app.get("/api/health")
@@ -149,4 +155,37 @@ def get_job_events(
         next_offset=next_offset,
         chunk=chunk,
         complete=job.status in {JobStatus.succeeded, JobStatus.failed},
+    )
+
+
+def _safe_frontend_path(relative_path: str) -> Path | None:
+    if not relative_path:
+        return None
+
+    candidate = (frontend_dist_root / relative_path).resolve()
+    try:
+        candidate.relative_to(frontend_dist_root.resolve())
+    except ValueError:
+        return None
+
+    if candidate.is_file():
+        return candidate
+    return None
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def serve_frontend(full_path: str) -> FileResponse:
+    if full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    asset_path = _safe_frontend_path(full_path)
+    if asset_path is not None:
+        return FileResponse(asset_path)
+
+    if frontend_index_file.exists():
+        return FileResponse(frontend_index_file)
+
+    raise HTTPException(
+        status_code=503,
+        detail="Frontend build not found. Run `npm run build` in `frontend/` before serving the app.",
     )

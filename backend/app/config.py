@@ -29,6 +29,7 @@ class Settings:
     workspace_root: Path
     data_root: Path
     jobs_root: Path
+    frontend_dist_root: Path
     codex_bin: str
     cors_origins: list[str]
     workspace_write_strategy: WorkspaceWriteStrategy
@@ -45,6 +46,7 @@ def get_settings() -> Settings:
         workspace_root=workspace_root,
         data_root=data_root,
         jobs_root=data_root / "jobs",
+        frontend_dist_root=project_root / "frontend" / "dist",
         codex_bin=os.getenv("CODEX_BIN", "codex"),
         cors_origins=_split_origins(os.getenv("CORS_ORIGINS")),
         workspace_write_strategy=_parse_write_strategy(os.getenv("WORKSPACE_WRITE_STRATEGY")),

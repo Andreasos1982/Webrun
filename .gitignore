@@ -20,7 +20,7 @@ build/
 # Runtime data
 data/
 logs/
+.run/
 
 frontend/node_modules/
 frontend/dist/
-

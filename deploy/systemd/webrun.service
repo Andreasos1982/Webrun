@@ -1,0 +1,19 @@
+[Unit]
+Description=webrun product service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/andy/apps/webrun
+Environment=WORKSPACE_ROOT=/home/andy/apps/webrun
+Environment=DATA_ROOT=/home/andy/apps/webrun/data
+Environment=CODEX_BIN=codex
+Environment=WORKSPACE_WRITE_STRATEGY=disabled
+ExecStartPre=/usr/bin/env bash -lc 'cd /home/andy/apps/webrun/frontend && npm run build'
+ExecStart=/usr/bin/env bash -lc 'cd /home/andy/apps/webrun && python3 -m uvicorn backend.app.main:app --host 172.18.0.1 --port 17800'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

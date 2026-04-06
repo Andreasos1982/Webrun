@@ -7,7 +7,7 @@ import type {
   RuntimeInfo,
 } from "./types";
 
-const inferredApiBase = `${window.location.protocol}//${window.location.hostname}:8000/api`;
+const inferredApiBase = `${window.location.origin}/api`;
 export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? inferredApiBase;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
