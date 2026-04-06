@@ -1,15 +1,52 @@
-# Web Runner
+# webrun
 
-Minimal browser-based Codex runner for a VPS.
+`webrun` is the actual product app: a browser-based Codex web runner for a VPS.
 
-This MVP includes:
+It is intentionally separate from the marketing site in `../lexmark`.
 
-- A FastAPI backend in `backend/`
-- A React + Vite frontend in `frontend/`
-- Disk-backed local job storage under `data/jobs/`
-- A first working read-only job flow
+## Current State
 
-The current read-only flow works by building a bounded snapshot of the workspace on the backend and sending that snapshot to `codex exec` in JSON mode. That keeps the MVP practical and avoids exposing write access yet. The next step is adding a write-enabled executor that lets Codex operate directly on the workspace.
+The repo now contains:
+
+- FastAPI backend in `backend/`
+- React + Vite frontend in `frontend/`
+- Detached disk-backed job workers
+- Persistent job metadata under `data/jobs/`
+- Readable logs in `output.log`
+- Raw Codex event capture in `events.jsonl`
+- A VS-Code-like browser surface with job explorer, task composer, response panel, logs, and raw events
+
+## Job Modes
+
+### `read-only`
+
+- enabled by default
+- backend builds a bounded workspace snapshot
+- Codex runs with `--sandbox read-only`
+- safest mode for repo inspection, summarization, and planning
+
+### `workspace-write`
+
+- live workspace mode
+- disabled by default on this VPS
+- can be enabled explicitly through `WORKSPACE_WRITE_STRATEGY`
+
+Supported strategies:
+
+- `disabled`
+- `workspace-write`
+- `danger-full-access`
+
+Important VPS caveat:
+
+On this host, the native Codex `workspace-write` sandbox currently fails with:
+
+`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`
+
+That means the practical choices are:
+
+- keep `workspace-write` disabled and use robust read-only mode
+- or, for trusted internal use only, enable `WORKSPACE_WRITE_STRATEGY=danger-full-access`
 
 ## Requirements
 
@@ -17,21 +54,18 @@ The current read-only flow works by building a bounded snapshot of the workspace
 - Node.js 20+
 - `codex` CLI installed and logged in on the VPS
 
-If `python3 -m venv .venv` fails on Debian or Ubuntu, install the missing system package first:
+Check the CLI:
 
 ```bash
-sudo apt install python3-venv
-```
-
-If you have not authenticated Codex on the box yet:
-
-```bash
+codex --version
 codex login
 ```
 
-## Local Run
+## Python Setup Notes For This VPS
 
-From the repository root:
+This VPS can be awkward for Python packaging.
+
+Preferred setup:
 
 ```bash
 python3 -m venv .venv
@@ -39,7 +73,19 @@ source .venv/bin/activate
 pip install -r backend/requirements.txt
 ```
 
-Install the frontend dependencies:
+If `python3 -m venv .venv` fails because `python3-venv` is missing:
+
+```bash
+sudo apt install python3-venv
+```
+
+If you must use the host Python without a venv, one fallback that worked on this box was:
+
+```bash
+~/.local/bin/pip install --user --break-system-packages -r backend/requirements.txt
+```
+
+## Frontend Setup
 
 ```bash
 cd frontend
@@ -47,51 +93,106 @@ npm install
 cd ..
 ```
 
-Start the backend in one terminal:
+## Running Locally
+
+### 1. Start the backend
+
+From the repo root:
 
 ```bash
 source .venv/bin/activate
 uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Start the frontend in a second terminal:
+Useful environment variables:
+
+```bash
+export WORKSPACE_ROOT=/home/andy/apps/webrun
+export DATA_ROOT=/home/andy/apps/webrun/data
+export CODEX_BIN=codex
+export WORKSPACE_WRITE_STRATEGY=disabled
+```
+
+Write strategy options:
+
+```bash
+export WORKSPACE_WRITE_STRATEGY=disabled
+export WORKSPACE_WRITE_STRATEGY=workspace-write
+export WORKSPACE_WRITE_STRATEGY=danger-full-access
+```
+
+Only use `danger-full-access` on a trusted internal box.
+
+### 2. Start the frontend
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-Open the app in your browser:
+Default URLs:
 
-```text
-http://<your-vps-ip>:5173
+- frontend: `http://<host>:5173`
+- backend API: `http://<host>:8000/api`
+
+## Local Verification
+
+### Frontend build
+
+```bash
+cd frontend
+npm run build
 ```
 
-The frontend will call the backend at:
+### Backend syntax check
 
-```text
-http://<your-vps-ip>:8000/api
+```bash
+python3 -m compileall backend/app
 ```
 
-## API Endpoints
+### Backend/API smoke test
 
-- `POST /api/jobs` creates a job
-- `GET /api/jobs` lists jobs
-- `GET /api/jobs/{job_id}` returns full job metadata
-- `GET /api/jobs/{job_id}/status` returns status-only job state
-- `GET /api/jobs/{job_id}/logs?offset=0` returns append-only log output
+Start the backend first, then run:
+
+```bash
+python3 scripts/smoke_api.py
+```
+
+Optional examples:
+
+```bash
+python3 scripts/smoke_api.py --api-base http://127.0.0.1:8000/api
+python3 scripts/smoke_api.py --mode read-only --prompt "Summarize the backend architecture."
+python3 scripts/smoke_api.py --mode workspace-write --prompt "Add a small README note." --timeout 180
+```
+
+If `workspace-write` is disabled, the smoke script will fail fast with the API error message.
+
+## API
+
+- `GET /api/health`
+- `GET /api/runtime`
+- `GET /api/jobs`
+- `POST /api/jobs`
+- `GET /api/jobs/{job_id}`
+- `GET /api/jobs/{job_id}/status`
+- `GET /api/jobs/{job_id}/logs?offset=0`
+- `GET /api/jobs/{job_id}/events?offset=0`
 
 ## Job Storage
 
-Each job is stored under `data/jobs/<job_id>/`:
+Each job lives under `data/jobs/<job_id>/`:
 
-- `job.json` for job metadata and status
-- `output.log` for the readable log panel
-- `events.jsonl` for raw Codex JSONL events
+- `job.json`: persisted job metadata and final result
+- `output.log`: human-readable log stream for the browser output panel
+- `events.jsonl`: raw Codex JSONL events
 
-## Current Scope
+## Architecture Notes
 
-- Read-only jobs only
-- No auth layer yet
-- No streaming websockets yet
-- No write-enabled Codex execution yet
+- API requests create a job record first
+- backend launches a detached worker process per job
+- worker owns the Codex subprocess and all job file writes
+- browser disconnects do not stop jobs
+- backend restarts no longer depend on an in-process thread to keep the run alive
+
+Additional notes live in [`docs/architecture.md`](docs/architecture.md).
