@@ -11,6 +11,7 @@ The repo now contains:
 - FastAPI backend in `backend/`
 - React + Vite frontend in `frontend/`
 - Detached disk-backed job workers
+- Built frontend served by FastAPI for single-origin production deploys
 - Persistent job metadata under `data/jobs/`
 - Readable logs in `output.log`
 - Raw Codex event capture in `events.jsonl`
@@ -135,6 +136,62 @@ Default URLs:
 - frontend: `http://<host>:5173`
 - backend API: `http://<host>:8000/api`
 
+In dev, Vite proxies `/api` to `127.0.0.1:8000`, so the frontend can use the same-origin `/api` base that production uses.
+
+## Production On This VPS
+
+The production path on this host is now:
+
+- build the frontend into `frontend/dist`
+- serve both UI and API from FastAPI on the same origin
+- run `webrun` as a user-level systemd service
+- let Nginx Proxy Manager terminate TLS and apply access control
+
+Configured values on this VPS:
+
+- app service bind: `172.18.0.1:17800`
+- NPM host: `dev.cs-automation.info`
+- NPM access list: `AndymagAdmin`
+
+### Service Files
+
+- repo unit template: `deploy/systemd/webrun.service`
+- installed user unit: `~/.config/systemd/user/webrun.service`
+- helper wrapper: `scripts/webrun-service.sh`
+
+### Service Commands
+
+```bash
+systemctl --user status webrun.service --no-pager
+systemctl --user restart webrun.service
+journalctl --user -u webrun.service -n 100 --no-pager
+```
+
+Important note:
+
+`webrun.service` is a user service. On this VPS, `loginctl show-user andy -p Linger` currently reports `Linger=no`, so a cold-boot auto-start still needs the host-side linger setting to be enabled once by root.
+
+The wrapper script remains useful for manual fallback control:
+
+```bash
+./scripts/webrun-service.sh start
+./scripts/webrun-service.sh stop
+./scripts/webrun-service.sh status
+```
+
+### Reverse Proxy
+
+The NPM proxy host forwards:
+
+- `dev.cs-automation.info` -> `http://172.18.0.1:17800`
+
+Current NPM settings:
+
+- Let's Encrypt certificate enabled
+- force SSL enabled
+- HTTP/2 enabled
+- `AndymagAdmin` access list attached
+
 ## Local Verification
 
 ### Frontend build
@@ -194,5 +251,6 @@ Each job lives under `data/jobs/<job_id>/`:
 - worker owns the Codex subprocess and all job file writes
 - browser disconnects do not stop jobs
 - backend restarts no longer depend on an in-process thread to keep the run alive
+- in production, the built frontend is served by the backend so UI and API share one origin
 
 Additional notes live in [`docs/architecture.md`](docs/architecture.md).
