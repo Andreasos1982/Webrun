@@ -370,7 +370,7 @@ textarea {
 .workbench {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 470px;
+  grid-template-columns: minmax(320px, 1fr) minmax(560px, 2fr);
 }
 
 .editor-stage {
@@ -636,7 +636,7 @@ textarea {
 
 @media (max-width: 1440px) {
   .workbench {
-    grid-template-columns: minmax(0, 1fr) 430px;
+    grid-template-columns: minmax(300px, 0.95fr) minmax(500px, 1.8fr);
   }
 
   .stage-grid {
