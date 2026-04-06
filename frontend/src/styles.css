@@ -22,6 +22,7 @@
   --danger: #f48771;
   --unsafe: #ffb86c;
   --shadow: 0 22px 48px rgba(0, 0, 0, 0.28);
+  font-size: 13px;
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
 }
 
@@ -79,10 +80,11 @@ textarea {
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
   display: grid;
   grid-template-columns: 54px 300px minmax(0, 1fr);
   background: var(--bg-app);
+  overflow: hidden;
 }
 
 .activity-bar {
@@ -123,7 +125,7 @@ textarea {
 }
 
 .sidebar {
-  min-height: 100vh;
+  min-height: 0;
   border-right: 1px solid var(--border);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 15%),
@@ -369,33 +371,47 @@ textarea {
 
 .workbench {
   min-width: 0;
+  min-height: 0;
   display: grid;
   grid-template-columns: minmax(320px, 1fr) minmax(560px, 2fr);
 }
 
 .editor-stage {
   min-width: 0;
+  min-height: 0;
   padding: 22px;
   border-right: 1px solid var(--border);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 18%),
     #1b1b1d;
+  overflow: auto;
 }
 
 .chat-pane {
   min-width: 0;
   display: grid;
+  min-height: 0;
+  grid-template-areas:
+    "header"
+    "transcript"
+    "inspector"
+    "composer";
   grid-template-rows: auto minmax(0, 1fr) auto auto;
   gap: 14px;
   padding: 18px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 16%),
     #18191b;
+  overflow: hidden;
 }
 
 .title-bar,
 .chat-header {
   margin-bottom: 16px;
+}
+
+.chat-header {
+  grid-area: header;
 }
 
 .stage-grid {
@@ -475,6 +491,7 @@ textarea {
 }
 
 .chat-surface {
+  grid-area: transcript;
   min-height: 0;
   overflow: auto;
   padding: 16px;
@@ -518,6 +535,17 @@ textarea {
   padding: 14px;
 }
 
+.composer-card {
+  grid-area: composer;
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+}
+
+.panel-surface {
+  grid-area: inspector;
+}
+
 .composer-toolbar {
   margin-bottom: 12px;
 }
@@ -541,8 +569,8 @@ textarea {
 }
 
 .composer-input {
-  min-height: 124px;
-  padding: 14px;
+  min-height: 100px;
+  padding: 12px;
 }
 
 .composer-grid {
@@ -593,7 +621,7 @@ textarea {
 
 .terminal-output {
   min-height: 180px;
-  max-height: 260px;
+  max-height: 200px;
   overflow: auto;
   padding: 12px;
   border-radius: 12px;
