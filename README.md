@@ -11,11 +11,30 @@ The repo now contains:
 - FastAPI backend in `backend/`
 - React + Vite frontend in `frontend/`
 - Detached disk-backed job workers
+- Persistent chat-style sessions with alternating user / Codex messages
 - Built frontend served by FastAPI for single-origin production deploys
 - Persistent job metadata under `data/jobs/`
 - Readable logs in `output.log`
 - Raw Codex event capture in `events.jsonl`
-- A VS-Code-like browser surface with job explorer, task composer, response panel, logs, and raw events
+- A VS-Code-like browser surface with session explorer, Codex chat thread, model picker, reasoning picker, access picker, logs, and raw events
+
+## Codex-Style Session UX
+
+The browser surface is now organized around a persistent session instead of a single one-off prompt:
+
+- left sidebar for sessions
+- main chat thread with alternating user and Codex messages
+- composer controls for:
+  - model
+  - reasoning effort
+  - access mode
+- bottom panel for logs, raw events, and session details
+
+Why this shape:
+
+- it matches the core interaction style documented for the Codex IDE extension
+- it lets you follow a conversation over multiple turns
+- it keeps per-turn runner settings visible and persistent
 
 ## Job Modes
 
@@ -112,6 +131,9 @@ export WORKSPACE_ROOT=/home/andy/apps/webrun
 export DATA_ROOT=/home/andy/apps/webrun/data
 export CODEX_BIN=codex
 export WORKSPACE_WRITE_STRATEGY=disabled
+export CODEX_DEFAULT_MODEL=gpt-5.4
+export CODEX_AVAILABLE_MODELS=gpt-5.4,gpt-5.3-codex,gpt-5.3-codex-spark
+export CODEX_DEFAULT_REASONING_EFFORT=xhigh
 ```
 
 Write strategy options:
@@ -170,7 +192,7 @@ journalctl --user -u webrun.service -n 100 --no-pager
 
 Important note:
 
-`webrun.service` is a user service. On this VPS, `loginctl show-user andy -p Linger` currently reports `Linger=no`, so a cold-boot auto-start still needs the host-side linger setting to be enabled once by root.
+`webrun.service` is a user service. On this VPS, linger has already been enabled for `andy`, so the service now auto-starts again after a cold reboot.
 
 The wrapper script remains useful for manual fallback control:
 
@@ -225,7 +247,7 @@ Optional examples:
 ```bash
 python3 scripts/smoke_api.py --api-base http://127.0.0.1:8000/api
 python3 scripts/smoke_api.py --mode read-only --prompt "Summarize the backend architecture."
-python3 scripts/smoke_api.py --mode workspace-write --prompt "Add a small README note." --timeout 180
+python3 scripts/smoke_api.py --mode workspace-write --prompt "Add a small README note." --follow-up "Now summarize what you changed." --timeout 180
 ```
 
 If `workspace-write` is disabled, the smoke script will fail fast with the API error message.
@@ -236,6 +258,7 @@ If `workspace-write` is disabled, the smoke script will fail fast with the API e
 - `GET /api/runtime`
 - `GET /api/jobs`
 - `POST /api/jobs`
+- `POST /api/jobs/{job_id}/messages`
 - `GET /api/jobs/{job_id}`
 - `GET /api/jobs/{job_id}/status`
 - `GET /api/jobs/{job_id}/logs?offset=0`
@@ -245,14 +268,15 @@ If `workspace-write` is disabled, the smoke script will fail fast with the API e
 
 Each job lives under `data/jobs/<job_id>/`:
 
-- `job.json`: persisted job metadata and final result
+- `job.json`: persisted session metadata, current runner state, and full message history
 - `output.log`: human-readable log stream for the browser output panel
 - `events.jsonl`: raw Codex JSONL events
 
 ## Architecture Notes
 
 - API requests create a job record first
-- backend launches a detached worker process per job
+- follow-up messages reuse the same disk-backed session record
+- backend launches a detached worker process per turn
 - worker owns the Codex subprocess and all job file writes
 - browser disconnects do not stop jobs
 - backend restarts no longer depend on an in-process thread to keep the run alive

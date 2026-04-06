@@ -36,14 +36,22 @@ def main() -> int:
         "--prompt",
         default="Inspect this workspace in read-only mode and summarize what is already here.",
     )
+    parser.add_argument(
+        "--follow-up",
+        default="Now answer in one short sentence what the main frontend surface is.",
+    )
     parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args()
 
     health = api_request(args.api_base, "/health")
     runtime = api_request(args.api_base, "/runtime")
+    model = runtime["default_model"]
+    reasoning_effort = runtime["default_reasoning_effort"]
     print(f"Health: {health['status']}")
     print(f"Workspace: {health['workspace_root']}")
     print(f"Write strategy: {runtime['workspace_write_strategy']}")
+    print(f"Model: {model}")
+    print(f"Reasoning: {reasoning_effort}")
 
     job = api_request(
         args.api_base,
@@ -52,20 +60,39 @@ def main() -> int:
         payload={
             "prompt": args.prompt,
             "mode": args.mode,
+            "model": model,
+            "reasoning_effort": reasoning_effort,
         },
     )
     job_id = job["id"]
-    print(f"Created job: {job_id} ({job['mode']})")
+    print(f"Created session: {job_id} ({job['mode']})")
 
-    deadline = time.time() + args.timeout
-    while time.time() < deadline:
-        job = api_request(args.api_base, f"/jobs/{parse.quote(job_id)}")
-        print(f"Polling job {job_id}: {job['status']}")
-        if job["status"] in {"succeeded", "failed"}:
-            break
-        time.sleep(2)
-    else:
-        raise SystemExit(f"Timed out waiting for job {job_id} to finish.")
+    def wait_for_completion() -> dict:
+        deadline = time.time() + args.timeout
+        while time.time() < deadline:
+            polled_job = api_request(args.api_base, f"/jobs/{parse.quote(job_id)}")
+            print(f"Polling session {job_id}: {polled_job['status']} (turns={polled_job['turn_count']})")
+            if polled_job["status"] in {"succeeded", "failed"}:
+                return polled_job
+            time.sleep(2)
+        raise SystemExit(f"Timed out waiting for session {job_id} to finish.")
+
+    job = wait_for_completion()
+
+    if args.follow_up:
+        follow_up_job = api_request(
+            args.api_base,
+            f"/jobs/{parse.quote(job_id)}/messages",
+            method="POST",
+            payload={
+                "prompt": args.follow_up,
+                "mode": args.mode,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
+            },
+        )
+        print(f"Queued follow-up turn: {follow_up_job['turn_count']}")
+        job = wait_for_completion()
 
     logs = api_request(args.api_base, f"/jobs/{parse.quote(job_id)}/logs?offset=0&limit=200000")
     events = api_request(args.api_base, f"/jobs/{parse.quote(job_id)}/events?offset=0&limit=200000")
@@ -75,11 +102,13 @@ def main() -> int:
     print("Executor:", job["executor"])
     print("Worker PID:", job.get("worker_pid"))
     print("Return code:", job.get("return_code"))
+    print("Messages:", len(job.get("messages") or []))
+    print("Turns:", job.get("turn_count"))
     if job.get("changed_files"):
         print("Changed files:", ", ".join(job["changed_files"]))
     if job.get("final_output"):
         print("")
-        print("Final output:")
+        print("Latest assistant output:")
         print(job["final_output"])
 
     print("")
