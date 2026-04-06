@@ -5,6 +5,8 @@ from functools import lru_cache
 from pathlib import Path
 import os
 
+from .models import WorkspaceWriteStrategy
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -15,6 +17,12 @@ def _split_origins(raw_value: str | None) -> list[str]:
     return [item.strip() for item in raw_value.split(",") if item.strip()]
 
 
+def _parse_write_strategy(raw_value: str | None) -> WorkspaceWriteStrategy:
+    if not raw_value:
+        return WorkspaceWriteStrategy.disabled
+    return WorkspaceWriteStrategy(raw_value.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     project_root: Path
@@ -23,6 +31,7 @@ class Settings:
     jobs_root: Path
     codex_bin: str
     cors_origins: list[str]
+    workspace_write_strategy: WorkspaceWriteStrategy
 
 
 @lru_cache
@@ -38,5 +47,5 @@ def get_settings() -> Settings:
         jobs_root=data_root / "jobs",
         codex_bin=os.getenv("CODEX_BIN", "codex"),
         cors_origins=_split_origins(os.getenv("CORS_ORIGINS")),
+        workspace_write_strategy=_parse_write_strategy(os.getenv("WORKSPACE_WRITE_STRATEGY")),
     )
-

@@ -17,6 +17,12 @@ class JobStatus(str, Enum):
     failed = "failed"
 
 
+class WorkspaceWriteStrategy(str, Enum):
+    disabled = "disabled"
+    workspace_write = "workspace-write"
+    danger_full_access = "danger-full-access"
+
+
 class JobRecord(BaseModel):
     id: str
     prompt: str
@@ -32,4 +38,5 @@ class JobRecord(BaseModel):
     final_output: str | None = None
     error: str | None = None
     return_code: int | None = None
-
+    worker_pid: int | None = None
+    changed_files: list[str] = Field(default_factory=list)

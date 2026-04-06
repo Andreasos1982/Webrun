@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator
 
-from .models import JobMode, JobRecord, JobStatus
+from .models import JobMode, JobRecord, JobStatus, WorkspaceWriteStrategy
 
 
 class CreateJobRequest(BaseModel):
@@ -20,12 +20,15 @@ class CreateJobRequest(BaseModel):
 
 class JobStatusResponse(BaseModel):
     id: str
+    mode: JobMode
     status: JobStatus
     updated_at: str
     started_at: str | None
     finished_at: str | None
     error: str | None
     executor: str
+    return_code: int | None
+    worker_pid: int | None
 
 
 class LogsResponse(BaseModel):
@@ -39,3 +42,29 @@ class LogsResponse(BaseModel):
 class JobsResponse(BaseModel):
     jobs: list[JobRecord]
 
+
+class EventsResponse(BaseModel):
+    job_id: str
+    offset: int
+    next_offset: int
+    chunk: str
+    complete: bool
+
+
+class ModeCapabilityResponse(BaseModel):
+    mode: JobMode
+    label: str
+    enabled: bool
+    dangerous: bool
+    launch_strategy: str
+    executor: str
+    description: str
+    reason: str | None = None
+
+
+class RuntimeInfoResponse(BaseModel):
+    status: str
+    workspace_root: str
+    codex_bin: str
+    workspace_write_strategy: WorkspaceWriteStrategy
+    modes: list[ModeCapabilityResponse]
