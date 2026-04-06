@@ -152,6 +152,7 @@ Configured values on this VPS:
 - app service bind: `172.18.0.1:17800`
 - NPM host: `dev.cs-automation.info`
 - NPM access list: `AndymagAdmin`
+- write strategy on this VPS: `danger-full-access`
 
 ### Service Files
 
@@ -191,6 +192,10 @@ Current NPM settings:
 - force SSL enabled
 - HTTP/2 enabled
 - `AndymagAdmin` access list attached
+
+Important:
+
+`workspace-write` is enabled on this VPS through `WORKSPACE_WRITE_STRATEGY=danger-full-access`, not through the native Codex `workspace-write` sandbox. That is the working option on this host because the native sandbox still fails here with the bubblewrap loopback error.
 
 ## Local Verification
 
