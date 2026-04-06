@@ -4,8 +4,8 @@ import subprocess
 import sys
 
 from ..config import Settings
-from ..models import JobMode, JobStatus
-from .modes import get_mode_spec
+from ..models import JobMode, JobStatus, ReasoningEffort
+from .modes import build_exec_command, get_mode_spec
 from .storage import JobStore, utc_now
 
 
@@ -34,8 +34,8 @@ class JobRunner:
         except FileNotFoundError as exc:
             raise RuntimeError(f"Unable to launch the job worker: {exc}") from exc
 
-    def preview_command(self, mode: JobMode) -> list[str]:
-        return get_mode_spec(self.settings, mode).command
+    def preview_command(self, mode: JobMode, model: str, reasoning_effort: ReasoningEffort) -> list[str]:
+        return build_exec_command(self.settings, mode, model=model, reasoning_effort=reasoning_effort)
 
     def fail_to_start(self, job_id: str, message: str) -> None:
         job = self.store.get_job(job_id)

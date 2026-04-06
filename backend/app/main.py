@@ -7,14 +7,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from .config import get_settings
-from .models import JobRecord, JobStatus
+from .models import JobRecord, JobStatus, ReasoningEffort
 from .schemas import (
+    AppendMessageRequest,
     CreateJobRequest,
     EventsResponse,
     JobStatusResponse,
     JobsResponse,
     LogsResponse,
+    ModelOptionResponse,
     ModeCapabilityResponse,
+    ReasoningEffortOptionResponse,
     RuntimeInfoResponse,
 )
 from .services.runner import JobRunner
@@ -37,6 +40,20 @@ app.add_middleware(
 
 frontend_dist_root = settings.frontend_dist_root
 frontend_index_file = frontend_dist_root / "index.html"
+
+
+MODEL_COPY: dict[str, str] = {
+    "gpt-5.4": "Recommended default for most coding work in Codex.",
+    "gpt-5.3-codex": "Codex-optimized coding model for deeper implementation work.",
+    "gpt-5.3-codex-spark": "Faster lightweight Codex model when latency matters most.",
+}
+
+REASONING_COPY: dict[ReasoningEffort, tuple[str, str]] = {
+    ReasoningEffort.low: ("Niedrig", "Faster responses with lighter reasoning."),
+    ReasoningEffort.medium: ("Mittel", "Balanced speed and reasoning depth for everyday tasks."),
+    ReasoningEffort.high: ("Hoch", "More deliberate reasoning for tricky code and debugging work."),
+    ReasoningEffort.xhigh: ("Extra hoch", "Maximum reasoning depth for the hardest tasks on this host."),
+}
 
 
 @app.get("/api/health")
@@ -64,11 +81,32 @@ def runtime_info() -> RuntimeInfoResponse:
         )
         for spec in list_mode_specs(settings)
     ]
+    available_models = [
+        ModelOptionResponse(
+            id=model_id,
+            label=model_id.upper() if model_id.startswith("gpt-") else model_id,
+            description=MODEL_COPY.get(model_id, "Available model configured for this Codex host."),
+            recommended=model_id == settings.default_model,
+        )
+        for model_id in settings.available_models
+    ]
+    reasoning_efforts = [
+        ReasoningEffortOptionResponse(
+            value=effort,
+            label=REASONING_COPY[effort][0],
+            description=REASONING_COPY[effort][1],
+        )
+        for effort in ReasoningEffort
+    ]
     return RuntimeInfoResponse(
         status="ok",
         workspace_root=str(settings.workspace_root),
         codex_bin=settings.codex_bin,
         workspace_write_strategy=settings.workspace_write_strategy,
+        default_model=settings.default_model,
+        default_reasoning_effort=settings.default_reasoning_effort,
+        available_models=available_models,
+        reasoning_efforts=reasoning_efforts,
         modes=modes,
     )
 
@@ -93,6 +131,8 @@ def create_job(payload: CreateJobRequest) -> JobRecord:
         prompt=payload.prompt,
         mode=payload.mode,
         cwd=str(settings.workspace_root),
+        model=payload.model,
+        reasoning_effort=payload.reasoning_effort,
     )
     try:
         runner.start(job.id)
@@ -100,6 +140,32 @@ def create_job(payload: CreateJobRequest) -> JobRecord:
         runner.fail_to_start(job.id, str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return job
+
+
+@app.post("/api/jobs/{job_id}/messages", response_model=JobRecord)
+def append_job_message(job_id: str, payload: AppendMessageRequest) -> JobRecord:
+    mode_spec = next((spec for spec in list_mode_specs(settings) if spec.mode == payload.mode), None)
+    if mode_spec is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported job mode: {payload.mode.value}",
+        )
+    if not mode_spec.enabled:
+        raise HTTPException(status_code=400, detail=mode_spec.reason or "This job mode is not available.")
+
+    job = store.append_user_turn(
+        job_id=job_id,
+        prompt=payload.prompt,
+        mode=payload.mode,
+        model=payload.model,
+        reasoning_effort=payload.reasoning_effort,
+    )
+    try:
+        runner.start(job.id)
+    except RuntimeError as exc:
+        runner.fail_to_start(job.id, str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return store.get_job(job.id)
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobRecord)
@@ -121,6 +187,7 @@ def get_job_status(job_id: str) -> JobStatusResponse:
         executor=job.executor,
         return_code=job.return_code,
         worker_pid=job.worker_pid,
+        thread_id=job.thread_id,
     )
 
 

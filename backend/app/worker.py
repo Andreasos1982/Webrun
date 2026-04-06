@@ -9,8 +9,8 @@ import subprocess
 import sys
 
 from .config import get_settings
-from .models import JobRecord, JobStatus
-from .services.modes import ModeSpec, get_mode_spec
+from .models import ConversationMessage, JobRecord, JobStatus, MessageRole
+from .services.modes import ModeSpec, build_exec_command, get_mode_spec
 from .services.snapshot import WorkspaceSnapshotBuilder
 from .services.storage import JobStore, utc_now
 
@@ -20,6 +20,7 @@ class RenderedEvent:
     log_line: str | None = None
     final_output: str | None = None
     changed_files: tuple[str, ...] = field(default_factory=tuple)
+    thread_id: str | None = None
 
 
 class JobWorker:
@@ -31,6 +32,7 @@ class JobWorker:
     def run(self, job_id: str) -> None:
         job = self.store.get_job(job_id)
         mode_spec = get_mode_spec(self.settings, job.mode)
+        current_turn = job.turn_count
 
         if not mode_spec.enabled:
             self._fail_job(job, mode_spec.reason or f"Job mode {job.mode.value} is not available.")
@@ -38,14 +40,23 @@ class JobWorker:
 
         job.status = JobStatus.running
         job.executor = mode_spec.executor
-        job.command = mode_spec.command
+        job.command = build_exec_command(
+            self.settings,
+            job.mode,
+            model=job.model,
+            reasoning_effort=job.reasoning_effort,
+        )
         job.worker_pid = os.getpid()
         job.started_at = utc_now()
+        job.finished_at = None
+        job.error = None
         job.updated_at = job.started_at
         self.store.save_job(job)
 
-        self.store.append_log(job.id, f"[system] Job {job.id} accepted")
+        self.store.append_log(job.id, f"[system] Session {job.id} turn {current_turn} accepted")
         self.store.append_log(job.id, f"[system] Mode: {job.mode.value}")
+        self.store.append_log(job.id, f"[system] Model: {job.model}")
+        self.store.append_log(job.id, f"[system] Reasoning: {job.reasoning_effort.value}")
         self.store.append_log(job.id, f"[system] Workspace: {job.cwd}")
         self.store.append_log(job.id, f"[system] Worker PID: {job.worker_pid}")
         self.store.append_log(job.id, f"[system] Executor: {mode_spec.executor}")
@@ -54,28 +65,34 @@ class JobWorker:
                 job.id,
                 "[warning] Live write mode is running without the native Codex sandbox on this host.",
             )
-        self.store.append_log(job.id, f"[user] {job.prompt}")
+
+        latest_user_message = next((message for message in reversed(job.messages) if message.role == MessageRole.user), None)
+        if latest_user_message:
+            self.store.append_log(job.id, f"[user] {latest_user_message.content}")
 
         try:
             prompt = self._build_prompt(job, mode_spec)
-            self._run_codex(job, mode_spec, prompt)
+            self._run_codex(job, prompt, current_turn=current_turn)
         except FileNotFoundError:
             self._fail_job(job, "The `codex` CLI was not found on this machine.")
         except Exception as exc:  # noqa: BLE001
             self._fail_job(job, f"Job failed unexpectedly: {exc}")
 
     def _build_prompt(self, job: JobRecord, mode_spec: ModeSpec) -> str:
+        transcript = self._render_transcript(job)
+
         if mode_spec.launch_strategy == "snapshot":
             snapshot = self.snapshot_builder.build(job.prompt)
             self.store.append_log(job.id, "[system] Built bounded workspace snapshot")
             self.store.append_log(job.id, f"[system] Snapshot characters: {len(snapshot)}")
             return (
                 "You are Codex running inside a browser-based VPS runner.\n"
-                "You are in strict read-only mode for this job.\n"
+                "You are continuing a chat-style coding conversation.\n"
+                "You are in strict read-only mode for this turn.\n"
                 "Do not call shell tools, MCP tools, or web search.\n"
-                "Answer only from the workspace snapshot below.\n"
+                "Answer only from the workspace snapshot below and the conversation transcript.\n"
                 "If the snapshot is insufficient, say exactly what is missing.\n\n"
-                f"User task:\n{job.prompt}\n\n"
+                f"Session transcript:\n{transcript}\n\n"
                 f"Workspace snapshot:\n{snapshot}\n"
             )
 
@@ -85,17 +102,18 @@ class JobWorker:
         )
         return (
             "You are Codex running inside a browser-based VPS runner.\n"
+            "You are continuing a chat-style coding conversation.\n"
             "You may inspect and edit files in the live workspace when necessary.\n"
-            "Stay focused on the user's task, keep changes minimal and deliberate, and summarize what you changed.\n"
+            "Stay focused on the user's latest request, keep changes minimal and deliberate, and summarize what you changed.\n"
             "Do not assume browser state is persistent; job logs and final output are surfaced in a web UI.\n\n"
-            f"User task:\n{job.prompt}\n"
+            f"Session transcript:\n{transcript}\n"
         )
 
-    def _run_codex(self, job: JobRecord, mode_spec: ModeSpec, prompt: str) -> None:
-        self.store.append_log(job.id, f"[system] Launching: {shlex.join(mode_spec.command)}")
+    def _run_codex(self, job: JobRecord, prompt: str, current_turn: int) -> None:
+        self.store.append_log(job.id, f"[system] Launching: {shlex.join(job.command)}")
 
         process = subprocess.Popen(
-            mode_spec.command,
+            job.command,
             cwd=job.cwd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -110,6 +128,7 @@ class JobWorker:
 
         final_output: str | None = None
         changed_files: set[str] = set()
+        thread_id: str | None = None
 
         assert process.stdout is not None
         for raw_line in process.stdout:
@@ -122,6 +141,8 @@ class JobWorker:
                 final_output = rendered.final_output
             if rendered.changed_files:
                 changed_files.update(rendered.changed_files)
+            if rendered.thread_id:
+                thread_id = rendered.thread_id
 
         return_code = process.wait()
         completed_job = self.store.get_job(job.id)
@@ -130,10 +151,24 @@ class JobWorker:
         completed_job.updated_at = completed_job.finished_at
         completed_job.final_output = final_output
         completed_job.changed_files = sorted(changed_files)
+        completed_job.thread_id = thread_id or completed_job.thread_id
 
         if return_code == 0:
             completed_job.status = JobStatus.succeeded
             completed_job.error = None
+            if final_output and not self._turn_has_assistant_message(completed_job, current_turn):
+                completed_job.messages.append(
+                    ConversationMessage(
+                        id=os.urandom(8).hex(),
+                        role=MessageRole.assistant,
+                        content=final_output,
+                        created_at=completed_job.finished_at,
+                        turn=current_turn,
+                        mode=completed_job.mode,
+                        model=completed_job.model,
+                        reasoning_effort=completed_job.reasoning_effort,
+                    )
+                )
             self.store.append_log(job.id, "[system] Job finished successfully")
         else:
             completed_job.status = JobStatus.failed
@@ -155,13 +190,25 @@ class JobWorker:
         try:
             event = json.loads(raw_line)
         except json.JSONDecodeError:
-            if raw_line:
-                return RenderedEvent(log_line=f"[raw] {raw_line}")
-            return RenderedEvent()
+            stripped = raw_line.strip()
+            if not stripped:
+                return RenderedEvent()
+            if "failed to warm featured plugin ids cache" in raw_line:
+                return RenderedEvent(
+                    log_line="[warning] Codex plugin cache refresh was denied upstream; continuing without it."
+                )
+            if "shell_snapshot" in raw_line:
+                return RenderedEvent(log_line="[warning] Codex shell snapshot cleanup warning.")
+            if stripped.startswith("<") and stripped.endswith(">"):
+                return RenderedEvent()
+            return RenderedEvent(log_line=f"[raw] {raw_line}")
 
         event_type = event.get("type")
         if event_type == "thread.started":
-            return RenderedEvent(log_line=f"[system] Codex thread started: {event.get('thread_id')}")
+            return RenderedEvent(
+                log_line=f"[system] Codex thread started: {event.get('thread_id')}",
+                thread_id=event.get("thread_id"),
+            )
         if event_type == "turn.started":
             return RenderedEvent(log_line="[system] Codex turn started")
         if event_type == "turn.completed":
@@ -216,6 +263,24 @@ class JobWorker:
             return path.relative_to(Path(cwd)).as_posix()
         except ValueError:
             return raw_path
+
+    def _render_transcript(self, job: JobRecord) -> str:
+        blocks: list[str] = []
+        for message in job.messages:
+            speaker = "User" if message.role == MessageRole.user else "Codex"
+            meta_parts = [f"turn {message.turn}"]
+            if message.model:
+                meta_parts.append(message.model)
+            if message.reasoning_effort:
+                meta_parts.append(message.reasoning_effort.value)
+            if message.mode:
+                meta_parts.append(message.mode.value)
+            meta = ", ".join(meta_parts)
+            blocks.append(f"{speaker} ({meta}):\n{message.content.strip()}")
+        return "\n\n".join(blocks)
+
+    def _turn_has_assistant_message(self, job: JobRecord, turn: int) -> bool:
+        return any(message.role == MessageRole.assistant and message.turn == turn for message in job.messages)
 
 
 def main() -> int:

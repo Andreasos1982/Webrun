@@ -1,13 +1,32 @@
-import { startTransition, useEffect, useState, type FormEvent } from "react";
+import {
+  startTransition,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 
-import { API_BASE, createJob, fetchEvents, fetchJob, fetchLogs, fetchRuntime, listJobs } from "./api";
-import type { JobMode, JobRecord, ModeCapability, RuntimeInfo } from "./types";
+import {
+  API_BASE,
+  appendMessage,
+  createJob,
+  fetchEvents,
+  fetchJob,
+  fetchLogs,
+  fetchRuntime,
+  listJobs,
+} from "./api";
+import type {
+  ConversationMessage,
+  JobMode,
+  JobRecord,
+  ModeCapability,
+  ReasoningEffort,
+  RuntimeInfo,
+} from "./types";
 
 
-const defaultPrompt =
-  "Inspect this workspace in read-only mode and summarize what is already here, what the main app pieces are, and what looks missing.";
-
-type PanelTab = "output" | "logs" | "events";
+type PanelTab = "logs" | "events" | "details";
 
 
 function formatDate(value: string | null): string {
@@ -22,12 +41,12 @@ function formatDate(value: string | null): string {
 }
 
 
-function summarizePrompt(prompt: string): string {
-  const singleLine = prompt.replace(/\s+/g, " ").trim();
-  if (singleLine.length <= 92) {
+function summarizeText(value: string, maxLength = 76): string {
+  const singleLine = value.replace(/\s+/g, " ").trim();
+  if (singleLine.length <= maxLength) {
     return singleLine;
   }
-  return `${singleLine.slice(0, 89)}...`;
+  return `${singleLine.slice(0, maxLength - 3)}...`;
 }
 
 
@@ -36,21 +55,72 @@ function getModeCapability(runtime: RuntimeInfo | null, mode: JobMode): ModeCapa
 }
 
 
+function getAccessLabel(capability: ModeCapability | null): string {
+  if (!capability) {
+    return "Zugriff";
+  }
+  if (capability.mode === "read-only") {
+    return "Mit Beschrankungen";
+  }
+  return capability.dangerous ? "Vollzugriff" : "Workspace schreiben";
+}
+
+
+function getAccessDescription(capability: ModeCapability | null): string {
+  if (!capability) {
+    return "Lade Zugriffseinstellungen.";
+  }
+  if (capability.mode === "read-only") {
+    return "Codex bleibt konsultativ und arbeitet auf einem bounded Snapshot.";
+  }
+  if (capability.dangerous) {
+    return "Codex arbeitet mit vollem Host-Zugriff, weil der native Workspace-Sandboxpfad auf diesem VPS nicht sauber verfugbar ist.";
+  }
+  return "Codex darf den Workspace lesen und gezielt bearbeiten.";
+}
+
+
+function lastMeaningfulMessage(job: JobRecord): ConversationMessage | null {
+  return job.messages[job.messages.length - 1] ?? null;
+}
+
+
+function messageRoleLabel(role: ConversationMessage["role"]): string {
+  return role === "user" ? "Du" : "Codex";
+}
+
+
+function panelTitle(tab: PanelTab): string {
+  if (tab === "logs") {
+    return "Logs";
+  }
+  if (tab === "events") {
+    return "Events";
+  }
+  return "Details";
+}
+
+
 export default function App() {
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [prompt, setPrompt] = useState(defaultPrompt);
+  const [prompt, setPrompt] = useState("");
   const [mode, setMode] = useState<JobMode>("read-only");
+  const [model, setModel] = useState("");
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("xhigh");
   const [logs, setLogs] = useState("");
   const [events, setEvents] = useState("");
-  const [activePanel, setActivePanel] = useState<PanelTab>("output");
+  const [activePanel, setActivePanel] = useState<PanelTab>("details");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const preserveNullSelectionRef = useRef(false);
+  const messagesRef = useRef<HTMLDivElement | null>(null);
 
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? null;
   const selectedModeCapability = getModeCapability(runtime, mode);
   const selectedJobCapability = selectedJob ? getModeCapability(runtime, selectedJob.mode) : null;
+  const canSubmit = Boolean(prompt.trim() && model && selectedModeCapability?.enabled && !selectedJob?.status.match(/queued|running/));
 
   useEffect(() => {
     let cancelled = false;
@@ -64,6 +134,15 @@ export default function App() {
 
         startTransition(() => {
           setRuntime(response);
+          setModel((current) => current || response.default_model);
+          setReasoningEffort(response.default_reasoning_effort);
+          setMode((current) => {
+            const currentModeAvailable = response.modes.some((item) => item.mode === current && item.enabled);
+            if (currentModeAvailable) {
+              return current;
+            }
+            return response.modes.find((item) => item.enabled)?.mode ?? "read-only";
+          });
         });
       } catch (requestError) {
         if (!cancelled) {
@@ -78,18 +157,6 @@ export default function App() {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    if (!runtime) {
-      return;
-    }
-
-    const currentModeAvailable = runtime.modes.some((item) => item.mode === mode && item.enabled);
-    if (!currentModeAvailable) {
-      const firstEnabledMode = runtime.modes.find((item) => item.enabled)?.mode ?? "read-only";
-      setMode(firstEnabledMode);
-    }
-  }, [runtime, mode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -107,12 +174,15 @@ export default function App() {
             if (current && response.jobs.some((job) => job.id === current)) {
               return current;
             }
+            if (current === null && preserveNullSelectionRef.current) {
+              return null;
+            }
             return response.jobs[0]?.id ?? null;
           });
         });
       } catch (requestError) {
         if (!cancelled) {
-          setError(requestError instanceof Error ? requestError.message : "Unable to load jobs.");
+          setError(requestError instanceof Error ? requestError.message : "Unable to load sessions.");
         }
       }
     }
@@ -152,7 +222,7 @@ export default function App() {
         });
       } catch (requestError) {
         if (!cancelled) {
-          setError(requestError instanceof Error ? requestError.message : "Unable to refresh the selected job.");
+          setError(requestError instanceof Error ? requestError.message : "Unable to refresh the selected session.");
         }
       }
     }
@@ -228,7 +298,7 @@ export default function App() {
           });
         }
 
-        eventsTimeoutId = window.setTimeout(pollEvents, response.complete ? 4000 : 1500);
+        eventsTimeoutId = window.setTimeout(pollEvents, response.complete ? 4000 : 1400);
       } catch (requestError) {
         if (!cancelled) {
           setError(requestError instanceof Error ? requestError.message : "Unable to load events.");
@@ -251,55 +321,123 @@ export default function App() {
     };
   }, [selectedJobId]);
 
+  useEffect(() => {
+    if (selectedJob) {
+      setMode(selectedJob.mode);
+      setModel(selectedJob.model);
+      setReasoningEffort(selectedJob.reasoning_effort);
+      return;
+    }
+
+    if (runtime) {
+      setMode(runtime.modes.find((item) => item.enabled)?.mode ?? "read-only");
+      setModel(runtime.default_model);
+      setReasoningEffort(runtime.default_reasoning_effort);
+    }
+  }, [selectedJobId, runtime]);
+
+  useEffect(() => {
+    const element = messagesRef.current;
+    if (!element) {
+      return;
+    }
+
+    element.scrollTo({
+      top: element.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [selectedJob?.messages.length, selectedJob?.status]);
+
+  function handleSelectJob(jobId: string) {
+    preserveNullSelectionRef.current = false;
+    setSelectedJobId(jobId);
+    setError(null);
+  }
+
+  function handleNewChat() {
+    preserveNullSelectionRef.current = true;
+    setSelectedJobId(null);
+    setPrompt("");
+    setError(null);
+    if (runtime) {
+      setMode(runtime.modes.find((item) => item.enabled)?.mode ?? "read-only");
+      setModel(runtime.default_model);
+      setReasoningEffort(runtime.default_reasoning_effort);
+    }
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmitting(true);
     setError(null);
 
-    try {
-      const job = await createJob({
-        prompt,
-        mode,
-      });
+    const payload = {
+      prompt,
+      mode,
+      model,
+      reasoning_effort: reasoningEffort,
+    };
 
+    try {
+      const job = selectedJob
+        ? await appendMessage(selectedJob.id, payload)
+        : await createJob(payload);
+
+      preserveNullSelectionRef.current = false;
       startTransition(() => {
         setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
         setSelectedJobId(job.id);
+        setPrompt("");
         setActivePanel("logs");
       });
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to create job.");
+      setError(requestError instanceof Error ? requestError.message : "Unable to send the message.");
     } finally {
       setSubmitting(false);
     }
   }
+
+  const currentPreviewMessage = selectedJob ? lastMeaningfulMessage(selectedJob) : null;
 
   return (
     <div className="app-shell">
       <aside className="activity-bar">
         <div className="activity-brand">WR</div>
         <button className="activity-button active" type="button">
-          Jobs
+          Codex
         </button>
         <button className="activity-button" type="button">
-          Task
+          Chat
         </button>
         <button className="activity-button" type="button">
-          Output
+          Logs
         </button>
       </aside>
 
       <aside className="sidebar">
         <div className="sidebar-section">
-          <p className="section-label">Explorer</p>
-          <h1>Sessions</h1>
-          <p className="sidebar-copy">Detached Codex runs backed by local job files under `data/jobs`.</p>
+          <div className="section-heading">
+            <div>
+              <p className="section-label">Explorer</p>
+              <h1>Sessions</h1>
+            </div>
+            <button className="ghost-button" onClick={handleNewChat} type="button">
+              Neuer Chat
+            </button>
+          </div>
+          <p className="sidebar-copy">
+            Chat-first Codex sessions mit persistenten Logs und wiederaufrufbaren Runs unter <code>data/jobs</code>.
+          </p>
         </div>
 
         <div className="runtime-card">
           <div className="runtime-row">
             <span className="runtime-key">Workspace</span>
             <span className="runtime-value">{runtime?.workspace_root ?? "Loading..."}</span>
+          </div>
+          <div className="runtime-row">
+            <span className="runtime-key">Modell</span>
+            <span className="runtime-value">{runtime?.default_model ?? "Loading..."}</span>
           </div>
           <div className="runtime-row">
             <span className="runtime-key">Write Strategy</span>
@@ -309,46 +447,52 @@ export default function App() {
 
         <div className="sidebar-section grow">
           <div className="section-heading">
-            <p className="section-label">Jobs</p>
+            <p className="section-label">Chats</p>
             <span className="section-count">{jobs.length}</span>
           </div>
 
           <div className="job-list">
             {jobs.length === 0 ? (
-              <div className="empty-card">No sessions yet.</div>
+              <div className="empty-card">Noch keine Session vorhanden.</div>
             ) : (
-              jobs.map((job) => (
-                <button
-                  key={job.id}
-                  className={`job-item ${job.id === selectedJobId ? "selected" : ""}`}
-                  onClick={() => setSelectedJobId(job.id)}
-                  type="button"
-                >
-                  <div className="job-item-meta">
-                    <span className={`status-pill ${job.status}`}>{job.status}</span>
-                    <span className={`mode-pill ${job.mode}`}>{job.mode}</span>
-                  </div>
-                  <p className="job-item-prompt">{summarizePrompt(job.prompt)}</p>
-                  <div className="job-item-footer">
-                    <span className="job-item-id">{job.id}</span>
-                    <span className="job-item-time">{formatDate(job.updated_at)}</span>
-                  </div>
-                </button>
-              ))
+              jobs.map((job) => {
+                const capability = getModeCapability(runtime, job.mode);
+                const lastMessage = lastMeaningfulMessage(job);
+
+                return (
+                  <button
+                    key={job.id}
+                    className={`job-item ${job.id === selectedJobId ? "selected" : ""}`}
+                    onClick={() => handleSelectJob(job.id)}
+                    type="button"
+                  >
+                    <div className="job-item-meta">
+                      <span className={`status-pill ${job.status}`}>{job.status}</span>
+                      <span className={`mode-pill ${job.mode}`}>{getAccessLabel(capability)}</span>
+                    </div>
+                    <p className="job-item-title">{job.title}</p>
+                    <p className="job-item-prompt">{summarizeText(lastMessage?.content ?? job.prompt, 88)}</p>
+                    <div className="job-item-footer">
+                      <span className="job-item-id">{job.turn_count} Turns</span>
+                      <span className="job-item-time">{formatDate(job.updated_at)}</span>
+                    </div>
+                  </button>
+                );
+              })
             )}
           </div>
         </div>
 
         <div className="sidebar-section mode-list">
           <div className="section-heading">
-            <p className="section-label">Modes</p>
+            <p className="section-label">Access</p>
           </div>
-          {runtime?.modes.map((item) => (
+          {(runtime?.modes ?? []).map((item) => (
             <div key={item.mode} className={`mode-card ${item.enabled ? "enabled" : "disabled"}`}>
               <div className="mode-card-top">
-                <strong>{item.label}</strong>
+                <strong>{getAccessLabel(item)}</strong>
                 <span className={`mode-state ${item.enabled ? "enabled" : "disabled"}`}>
-                  {item.enabled ? (item.dangerous ? "unsafe" : "ready") : "disabled"}
+                  {item.enabled ? (item.dangerous ? "riskant" : "bereit") : "deaktiviert"}
                 </span>
               </div>
               <p>{item.description}</p>
@@ -361,168 +505,307 @@ export default function App() {
       <main className="workbench">
         <header className="title-bar">
           <div>
-            <p className="section-label">Codex Web Runner</p>
-            <h2>{selectedJob ? `Session ${selectedJob.id}` : "No session selected"}</h2>
+            <p className="section-label">Codex Session</p>
+            <h2>{selectedJob ? selectedJob.title : "Neuer Chat"}</h2>
+            <p className="title-copy">
+              {selectedJob
+                ? `Thread ${selectedJob.turn_count} · ${selectedJob.model} · ${selectedJob.reasoning_effort}`
+                : "Starte eine neue Unterhaltung mit Codex und verfolge die Turns im Verlauf."}
+            </p>
           </div>
           <div className="title-bar-meta">
             {selectedJob ? <span className={`status-pill ${selectedJob.status}`}>{selectedJob.status}</span> : null}
-            {selectedJob ? <span className={`mode-pill ${selectedJob.mode}`}>{selectedJob.mode}</span> : null}
-            {selectedJobCapability?.dangerous ? <span className="danger-pill">full access</span> : null}
+            <span className={`mode-pill ${mode}`}>{getAccessLabel(selectedJobCapability ?? selectedModeCapability)}</span>
+            {selectedJobCapability?.dangerous ? <span className="danger-pill">volles system</span> : null}
           </div>
         </header>
 
-        <div className="workspace-grid">
-          <section className="editor-surface">
-            <div className="panel-heading">
+        <div className="workspace-grid chat-layout">
+          <section className="chat-surface">
+            <div className="chat-header">
               <div>
-                <p className="section-label">Task</p>
-                <h3>New Job</h3>
-              </div>
-              <div className="mode-selector-wrap">
-                <label className="field-label" htmlFor="mode">
-                  Mode
-                </label>
-                <select
-                  id="mode"
-                  className="mode-select"
-                  value={mode}
-                  onChange={(event) => setMode(event.target.value as JobMode)}
-                >
-                  {(runtime?.modes ?? []).map((item) => (
-                    <option key={item.mode} value={item.mode} disabled={!item.enabled}>
-                      {item.label}
-                      {!item.enabled ? " (disabled)" : item.dangerous ? " (unsafe)" : ""}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <form className="task-form" onSubmit={handleSubmit}>
-              <label className="field-label" htmlFor="prompt">
-                Prompt
-              </label>
-              <textarea
-                id="prompt"
-                className="prompt-editor"
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                placeholder="Describe the task for Codex."
-                rows={12}
-              />
-
-              <div className="composer-footer">
-                <div className="mode-summary">
-                  <strong>{selectedModeCapability?.label ?? "Loading mode..."}</strong>
-                  <p>{selectedModeCapability?.description ?? "Fetching runtime capabilities."}</p>
-                  {selectedModeCapability?.reason ? <p className="mode-note">{selectedModeCapability.reason}</p> : null}
-                </div>
-
-                <button
-                  className="primary-button"
-                  disabled={submitting || !prompt.trim() || !selectedModeCapability?.enabled}
-                  type="submit"
-                >
-                  {submitting ? "Starting..." : "Run Job"}
-                </button>
-              </div>
-            </form>
-
-            {error ? <div className="error-banner">{error}</div> : null}
-
-            <div className="detail-grid">
-              <div className="detail-card">
-                <p className="section-label">Session</p>
-                <h3>{selectedJob?.id ?? "No session selected"}</h3>
-                <p>Executor: {selectedJob?.executor ?? "pending"}</p>
-                <p>Started: {formatDate(selectedJob?.started_at ?? null)}</p>
-                <p>Finished: {formatDate(selectedJob?.finished_at ?? null)}</p>
-              </div>
-
-              <div className="detail-card">
-                <p className="section-label">Workspace</p>
-                <h3>Live Root</h3>
-                <p>{runtime?.workspace_root ?? "Loading..."}</p>
-                <p>Worker PID: {selectedJob?.worker_pid ?? "n/a"}</p>
-                <p>Codex Bin: {runtime?.codex_bin ?? "Loading..."}</p>
-              </div>
-
-              <div className="detail-card">
-                <p className="section-label">Changed Files</p>
-                <h3>{selectedJob?.changed_files.length ? `${selectedJob.changed_files.length} file(s)` : "No file edits yet"}</h3>
-                <div className="file-list">
-                  {selectedJob?.changed_files.length ? (
-                    selectedJob.changed_files.map((file) => (
-                      <code key={file} className="file-chip">
-                        {file}
-                      </code>
-                    ))
-                  ) : (
-                    <p>Read-only jobs stay empty here. Live write jobs will surface changed paths.</p>
-                  )}
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section className="panel-surface">
-            <div className="panel-header">
-              <div>
-                <p className="section-label">Panel</p>
-                <h3>Output</h3>
+                <p className="section-label">Chat</p>
+                <h3>{selectedJob ? "Unterhaltung" : "Codex Panel"}</h3>
               </div>
               {selectedJob ? <span className="job-item-id">/{selectedJob.id}</span> : null}
             </div>
 
-            <div className="panel-tabs">
-              <button
-                className={`panel-tab ${activePanel === "output" ? "active" : ""}`}
-                onClick={() => setActivePanel("output")}
-                type="button"
-              >
-                Response
-              </button>
-              <button
-                className={`panel-tab ${activePanel === "logs" ? "active" : ""}`}
-                onClick={() => setActivePanel("logs")}
-                type="button"
-              >
-                Logs
-              </button>
-              <button
-                className={`panel-tab ${activePanel === "events" ? "active" : ""}`}
-                onClick={() => setActivePanel("events")}
-                type="button"
-              >
-                Events
-              </button>
-            </div>
-
-            <div className="panel-body">
-              {activePanel === "output" ? (
+            <div className="chat-thread" ref={messagesRef}>
+              {selectedJob ? (
                 <>
-                  <pre className="panel-output">
-                    {selectedJob?.final_output ?? "Run a job to see the final assistant response here."}
-                  </pre>
-                  {selectedJob?.error ? <div className="error-inline">{selectedJob.error}</div> : null}
+                  {selectedJob.messages.map((message) => {
+                    const capability = getModeCapability(runtime, message.mode ?? "read-only");
+
+                    return (
+                      <article key={message.id} className={`message-card ${message.role}`}>
+                        <div className="message-meta">
+                          <strong>{messageRoleLabel(message.role)}</strong>
+                          <span>{formatDate(message.created_at)}</span>
+                        </div>
+                        <div className="message-flags">
+                          {message.model ? <span className="message-chip">{message.model}</span> : null}
+                          {message.reasoning_effort ? (
+                            <span className="message-chip">{message.reasoning_effort}</span>
+                          ) : null}
+                          <span className="message-chip">{getAccessLabel(capability)}</span>
+                          <span className="message-chip">Turn {message.turn}</span>
+                        </div>
+                        <div className="message-body">{message.content}</div>
+                      </article>
+                    );
+                  })}
+
+                  {selectedJob.status === "queued" || selectedJob.status === "running" ? (
+                    <article className="message-card assistant pending">
+                      <div className="message-meta">
+                        <strong>Codex</strong>
+                        <span>arbeitet gerade</span>
+                      </div>
+                      <div className="message-flags">
+                        <span className="message-chip">laufender Turn</span>
+                      </div>
+                      <div className="message-body typing-indicator">Antwort wird generiert...</div>
+                    </article>
+                  ) : null}
                 </>
-              ) : null}
-
-              {activePanel === "logs" ? (
-                <pre className="panel-output">{logs || "Select a session to stream its readable output log."}</pre>
-              ) : null}
-
-              {activePanel === "events" ? (
-                <pre className="panel-output">{events || "Select a session to inspect raw Codex JSONL events."}</pre>
-              ) : null}
+              ) : (
+                <div className="chat-empty-state">
+                  <div className="empty-mark">C</div>
+                  <h3>Codex Chat starten</h3>
+                  <p>
+                    Die offizielle Codex IDE arbeitet thread-basiert mit Chat-Verlauf, Modellwahl,
+                    Reasoning-Stufe und Zugriffsmodus. Dieses Panel bildet genau diese Kernelemente jetzt im Web nach.
+                  </p>
+                  <div className="empty-pills">
+                    <span className="message-chip">Model picker</span>
+                    <span className="message-chip">Denkaufwand</span>
+                    <span className="message-chip">Mit Beschrankungen / Vollzugriff</span>
+                    <span className="message-chip">/status</span>
+                    <span className="message-chip">/review</span>
+                  </div>
+                </div>
+              )}
             </div>
+
+            {selectedJob?.error ? <div className="error-banner">{selectedJob.error}</div> : null}
+
+            <form className="composer-card" onSubmit={handleSubmit}>
+              <div className="composer-toolbar">
+                <div className="control-group">
+                  <label className="field-label" htmlFor="model">
+                    Modell
+                  </label>
+                  <select
+                    id="model"
+                    className="mode-select"
+                    onChange={(event) => setModel(event.target.value)}
+                    value={model}
+                  >
+                    {(runtime?.available_models ?? []).map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.label}
+                        {item.recommended ? " · empfohlen" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="control-group">
+                  <label className="field-label" htmlFor="reasoning">
+                    Denkaufwand
+                  </label>
+                  <select
+                    id="reasoning"
+                    className="mode-select"
+                    onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffort)}
+                    value={reasoningEffort}
+                  >
+                    {(runtime?.reasoning_efforts ?? []).map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="control-group">
+                  <label className="field-label" htmlFor="mode">
+                    Zugriff
+                  </label>
+                  <select
+                    id="mode"
+                    className="mode-select"
+                    onChange={(event) => setMode(event.target.value as JobMode)}
+                    value={mode}
+                  >
+                    {(runtime?.modes ?? []).map((item) => (
+                      <option key={item.mode} disabled={!item.enabled} value={item.mode}>
+                        {getAccessLabel(item)}
+                        {!item.enabled ? " · deaktiviert" : item.dangerous ? " · riskant" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <label className="composer-field" htmlFor="prompt">
+                <span className="field-label">{selectedJob ? "Nachricht" : "Neuer Prompt"}</span>
+                <textarea
+                  id="prompt"
+                  className="prompt-editor chat-input"
+                  onChange={(event) => setPrompt(event.target.value)}
+                  placeholder={
+                    selectedJob
+                      ? "Schreibe die nachste Nachricht fur diese Session."
+                      : "Beschreibe die Aufgabe fur Codex."
+                  }
+                  rows={5}
+                  value={prompt}
+                />
+              </label>
+
+              <div className="composer-footer">
+                <div className="mode-summary">
+                  <strong>{getAccessLabel(selectedModeCapability)}</strong>
+                  <p>{getAccessDescription(selectedModeCapability)}</p>
+                  {selectedModeCapability?.reason ? (
+                    <p className="mode-note">{selectedModeCapability.reason}</p>
+                  ) : null}
+                </div>
+
+                <button className="primary-button" disabled={submitting || !canSubmit} type="submit">
+                  {submitting ? "Sende..." : selectedJob ? "Nachricht senden" : "Chat starten"}
+                </button>
+              </div>
+
+              {error ? <div className="error-banner">{error}</div> : null}
+            </form>
           </section>
+
+          <aside className="inspector-surface">
+            <div className="panel-heading">
+              <div>
+                <p className="section-label">Inspector</p>
+                <h3>Session Info</h3>
+              </div>
+            </div>
+
+            <div className="detail-stack">
+              <div className="detail-card">
+                <p className="section-label">Aktiv</p>
+                <h3>{selectedJob ? selectedJob.title : "Noch keine Session"}</h3>
+                <p>Status: {selectedJob?.status ?? "neu"}</p>
+                <p>Turns: {selectedJob?.turn_count ?? 0}</p>
+                <p>Zuletzt: {formatDate(selectedJob?.updated_at ?? null)}</p>
+              </div>
+
+              <div className="detail-card">
+                <p className="section-label">Runtime</p>
+                <h3>{model || runtime?.default_model || "Loading..."}</h3>
+                <p>Denkaufwand: {reasoningEffort}</p>
+                <p>Codex Bin: {runtime?.codex_bin ?? "Loading..."}</p>
+                <p>Workspace: {runtime?.workspace_root ?? "Loading..."}</p>
+              </div>
+
+              <div className="detail-card">
+                <p className="section-label">Letzte Nachricht</p>
+                <h3>{currentPreviewMessage ? messageRoleLabel(currentPreviewMessage.role) : "Warte auf Prompt"}</h3>
+                <p>{currentPreviewMessage ? summarizeText(currentPreviewMessage.content, 140) : "Noch keine Unterhaltung."}</p>
+              </div>
+            </div>
+          </aside>
         </div>
 
+        <section className="panel-surface">
+          <div className="panel-header">
+            <div>
+              <p className="section-label">Panel</p>
+              <h3>{panelTitle(activePanel)}</h3>
+            </div>
+            {selectedJob ? <span className="job-item-id">/{selectedJob.id}</span> : null}
+          </div>
+
+          <div className="panel-tabs">
+            <button
+              className={`panel-tab ${activePanel === "details" ? "active" : ""}`}
+              onClick={() => setActivePanel("details")}
+              type="button"
+            >
+              Details
+            </button>
+            <button
+              className={`panel-tab ${activePanel === "logs" ? "active" : ""}`}
+              onClick={() => setActivePanel("logs")}
+              type="button"
+            >
+              Logs
+            </button>
+            <button
+              className={`panel-tab ${activePanel === "events" ? "active" : ""}`}
+              onClick={() => setActivePanel("events")}
+              type="button"
+            >
+              Events
+            </button>
+          </div>
+
+          <div className="panel-body">
+            {activePanel === "details" ? (
+              <div className="panel-detail-grid">
+                <div className="detail-card">
+                  <p className="section-label">Thread</p>
+                  <h3>{selectedJob?.thread_id ?? "noch kein Codex thread"}</h3>
+                  <p>Executor: {selectedJob?.executor ?? "pending"}</p>
+                  <p>Worker PID: {selectedJob?.worker_pid ?? "n/a"}</p>
+                  <p>Return Code: {selectedJob?.return_code ?? "n/a"}</p>
+                </div>
+
+                <div className="detail-card">
+                  <p className="section-label">Command</p>
+                  <h3>{selectedJob?.command.length ? "Aktueller Launch" : "Noch kein Start"}</h3>
+                  <pre className="inline-code-block">
+                    {selectedJob?.command.length ? selectedJob.command.join(" ") : "Run a session to inspect the launch command."}
+                  </pre>
+                </div>
+
+                <div className="detail-card">
+                  <p className="section-label">Changed Files</p>
+                  <h3>
+                    {selectedJob?.changed_files.length
+                      ? `${selectedJob.changed_files.length} Datei(en)`
+                      : "Noch keine Dateiausgabe"}
+                  </h3>
+                  <div className="file-list">
+                    {selectedJob?.changed_files.length ? (
+                      selectedJob.changed_files.map((file) => (
+                        <code key={file} className="file-chip">
+                          {file}
+                        </code>
+                      ))
+                    ) : (
+                      <p>Read-only Sessions bleiben hier leer. Live-Write-Turns zeigen geanderte Pfade an.</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {activePanel === "logs" ? (
+              <pre className="panel-output">{logs || "Waehle eine Session, um den persistierten Runner-Log zu sehen."}</pre>
+            ) : null}
+
+            {activePanel === "events" ? (
+              <pre className="panel-output">{events || "Waehle eine Session, um den rohen Codex-Event-Stream zu sehen."}</pre>
+            ) : null}
+          </div>
+        </section>
+
         <footer className="status-bar">
-          <span>API: {API_BASE}</span>
-          <span>Strategy: {runtime?.workspace_write_strategy ?? "loading"}</span>
-          <span>Selected: {selectedJob?.id ?? "none"}</span>
+          <span>{selectedJob ? "Lokal" : "Neuer Chat"}</span>
+          <span>{getAccessLabel(selectedJobCapability ?? selectedModeCapability)}</span>
+          <span>{model || runtime?.default_model || "model"}</span>
+          <span>{reasoningEffort}</span>
+          <span>{API_BASE}</span>
         </footer>
       </main>
     </div>

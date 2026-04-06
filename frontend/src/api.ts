@@ -1,4 +1,5 @@
 import type {
+  AppendMessageRequest,
   CreateJobRequest,
   EventsResponse,
   JobRecord,
@@ -52,6 +53,13 @@ export function fetchJob(jobId: string): Promise<JobRecord> {
 
 export function createJob(payload: CreateJobRequest): Promise<JobRecord> {
   return request<JobRecord>("/jobs", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function appendMessage(jobId: string, payload: AppendMessageRequest): Promise<JobRecord> {
+  return request<JobRecord>(`/jobs/${jobId}/messages`, {
     method: "POST",
     body: JSON.stringify(payload),
   });

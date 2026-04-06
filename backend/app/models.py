@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -23,10 +24,37 @@ class WorkspaceWriteStrategy(str, Enum):
     danger_full_access = "danger-full-access"
 
 
+class ReasoningEffort(str, Enum):
+    low = "low"
+    medium = "medium"
+    high = "high"
+    xhigh = "xhigh"
+
+
+class MessageRole(str, Enum):
+    user = "user"
+    assistant = "assistant"
+
+
+class ConversationMessage(BaseModel):
+    id: str
+    role: MessageRole
+    content: str
+    created_at: str
+    turn: int
+    mode: JobMode | None = None
+    model: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    state: Literal["complete"] = "complete"
+
+
 class JobRecord(BaseModel):
     id: str
     prompt: str
+    title: str = ""
     mode: JobMode
+    model: str = "gpt-5.4"
+    reasoning_effort: ReasoningEffort = ReasoningEffort.xhigh
     status: JobStatus
     cwd: str
     executor: str = "pending"
@@ -39,4 +67,7 @@ class JobRecord(BaseModel):
     error: str | None = None
     return_code: int | None = None
     worker_pid: int | None = None
+    thread_id: str | None = None
+    turn_count: int = 0
+    messages: list[ConversationMessage] = Field(default_factory=list)
     changed_files: list[str] = Field(default_factory=list)

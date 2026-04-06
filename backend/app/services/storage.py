@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
-from ..models import JobMode, JobRecord, JobStatus
+from ..models import ConversationMessage, JobMode, JobRecord, JobStatus, MessageRole, ReasoningEffort
 
 
 def utc_now() -> str:
@@ -26,16 +26,39 @@ class JobStore:
         self.jobs_root.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
 
-    def create_job(self, prompt: str, mode: JobMode, cwd: str) -> JobRecord:
+    def create_job(
+        self,
+        prompt: str,
+        mode: JobMode,
+        cwd: str,
+        model: str,
+        reasoning_effort: ReasoningEffort,
+    ) -> JobRecord:
         now = utc_now()
+        normalized_prompt = prompt.strip()
+        first_message = ConversationMessage(
+            id=uuid4().hex,
+            role=MessageRole.user,
+            content=normalized_prompt,
+            created_at=now,
+            turn=1,
+            mode=mode,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
         job = JobRecord(
             id=uuid4().hex[:12],
-            prompt=prompt,
+            prompt=normalized_prompt,
+            title=self._build_title(normalized_prompt),
             mode=mode,
+            model=model,
+            reasoning_effort=reasoning_effort,
             status=JobStatus.queued,
             cwd=cwd,
             created_at=now,
             updated_at=now,
+            turn_count=1,
+            messages=[first_message],
         )
 
         job_dir = self._job_dir(job.id)
@@ -44,6 +67,55 @@ class JobStore:
         (job_dir / "output.log").write_text("", encoding="utf-8")
         self.save_job(job)
         return job
+
+    def append_user_turn(
+        self,
+        job_id: str,
+        prompt: str,
+        mode: JobMode,
+        model: str,
+        reasoning_effort: ReasoningEffort,
+    ) -> JobRecord:
+        with self._lock:
+            path = self._job_dir(job_id) / "job.json"
+            if not path.exists():
+                raise HTTPException(status_code=404, detail="Job not found.")
+
+            job = self._read_job_file(path)
+            if job.status in {JobStatus.queued, JobStatus.running}:
+                raise HTTPException(status_code=409, detail="This session is already running.")
+
+            now = utc_now()
+            normalized_prompt = prompt.strip()
+            turn = job.turn_count + 1
+            job.mode = mode
+            job.model = model
+            job.reasoning_effort = reasoning_effort
+            job.status = JobStatus.queued
+            job.error = None
+            job.return_code = None
+            job.worker_pid = None
+            job.started_at = None
+            job.finished_at = None
+            job.executor = "pending"
+            job.command = []
+            job.final_output = None
+            job.updated_at = now
+            job.turn_count = turn
+            job.messages.append(
+                ConversationMessage(
+                    id=uuid4().hex,
+                    role=MessageRole.user,
+                    content=normalized_prompt,
+                    created_at=now,
+                    turn=turn,
+                    mode=mode,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
+            )
+            self._write_job_unlocked(job)
+            return job
 
     def list_jobs(self) -> list[JobRecord]:
         jobs: list[JobRecord] = []
@@ -62,13 +134,9 @@ class JobStore:
         return self._reconcile_job(self._read_job_file(job_file))
 
     def save_job(self, job: JobRecord) -> JobRecord:
-        payload = job.model_dump(mode="json")
         path = self._job_dir(job.id) / "job.json"
-        tmp_path = path.with_name(f"{path.name}.tmp")
-        serialized = json.dumps(payload, indent=2)
         with self._lock:
-            tmp_path.write_text(serialized, encoding="utf-8")
-            tmp_path.replace(path)
+            self._write_job_unlocked(job)
         return job
 
     def append_event(self, job_id: str, line: str) -> None:
@@ -105,12 +173,63 @@ class JobStore:
     def _read_job_file(self, path: Path) -> JobRecord:
         return JobRecord.model_validate_json(path.read_text(encoding="utf-8"))
 
+    def _write_job_unlocked(self, job: JobRecord) -> None:
+        payload = job.model_dump(mode="json")
+        path = self._job_dir(job.id) / "job.json"
+        tmp_path = path.with_name(f"{path.name}.tmp")
+        serialized = json.dumps(payload, indent=2)
+        tmp_path.write_text(serialized, encoding="utf-8")
+        tmp_path.replace(path)
+
     def _reconcile_job(self, job: JobRecord) -> JobRecord:
+        updated = False
+
+        if not job.title:
+            job.title = self._build_title(job.prompt)
+            updated = True
+
+        if not job.messages and job.prompt:
+            job.messages.append(
+                ConversationMessage(
+                    id=uuid4().hex,
+                    role=MessageRole.user,
+                    content=job.prompt,
+                    created_at=job.created_at,
+                    turn=1,
+                    mode=job.mode,
+                    model=job.model,
+                    reasoning_effort=job.reasoning_effort,
+                )
+            )
+            if job.final_output:
+                job.messages.append(
+                    ConversationMessage(
+                        id=uuid4().hex,
+                        role=MessageRole.assistant,
+                        content=job.final_output,
+                        created_at=job.finished_at or job.updated_at,
+                        turn=1,
+                        mode=job.mode,
+                        model=job.model,
+                        reasoning_effort=job.reasoning_effort,
+                    )
+                )
+            job.turn_count = 1
+            updated = True
+
+        if job.turn_count == 0 and job.messages:
+            job.turn_count = max(message.turn for message in job.messages)
+            updated = True
+
+        if updated:
+            self.save_job(job)
+
         if job.finished_at:
             return job
 
         if job.status == JobStatus.queued and job.worker_pid is None:
-            age_seconds = (datetime.now(timezone.utc) - parse_utc(job.created_at)).total_seconds()
+            queue_reference = job.updated_at or job.created_at
+            age_seconds = (datetime.now(timezone.utc) - parse_utc(queue_reference)).total_seconds()
             if age_seconds >= 15:
                 job.status = JobStatus.failed
                 job.error = job.error or "Job worker did not start."
@@ -136,3 +255,9 @@ class JobStore:
         except PermissionError:
             return True
         return True
+
+    def _build_title(self, prompt: str) -> str:
+        single_line = " ".join(prompt.split())
+        if len(single_line) <= 64:
+            return single_line
+        return f"{single_line[:61]}..."

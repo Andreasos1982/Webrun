@@ -1,11 +1,28 @@
 export type JobMode = "read-only" | "workspace-write";
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 export type WorkspaceWriteStrategy = "disabled" | "workspace-write" | "danger-full-access";
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
+export type MessageRole = "user" | "assistant";
+
+export interface ConversationMessage {
+  id: string;
+  role: MessageRole;
+  content: string;
+  created_at: string;
+  turn: number;
+  mode: JobMode | null;
+  model: string | null;
+  reasoning_effort: ReasoningEffort | null;
+  state: "complete";
+}
 
 export interface JobRecord {
   id: string;
   prompt: string;
+  title: string;
   mode: JobMode;
+  model: string;
+  reasoning_effort: ReasoningEffort;
   status: JobStatus;
   cwd: string;
   executor: string;
@@ -18,6 +35,9 @@ export interface JobRecord {
   error: string | null;
   return_code: number | null;
   worker_pid: number | null;
+  thread_id: string | null;
+  turn_count: number;
+  messages: ConversationMessage[];
   changed_files: string[];
 }
 
@@ -28,6 +48,15 @@ export interface JobsResponse {
 export interface CreateJobRequest {
   prompt: string;
   mode: JobMode;
+  model: string;
+  reasoning_effort: ReasoningEffort;
+}
+
+export interface AppendMessageRequest {
+  prompt: string;
+  mode: JobMode;
+  model: string;
+  reasoning_effort: ReasoningEffort;
 }
 
 export interface LogsResponse {
@@ -57,10 +86,27 @@ export interface ModeCapability {
   reason: string | null;
 }
 
+export interface ModelOption {
+  id: string;
+  label: string;
+  description: string;
+  recommended: boolean;
+}
+
+export interface ReasoningEffortOption {
+  value: ReasoningEffort;
+  label: string;
+  description: string;
+}
+
 export interface RuntimeInfo {
   status: string;
   workspace_root: string;
   codex_bin: string;
   workspace_write_strategy: WorkspaceWriteStrategy;
+  default_model: string;
+  default_reasoning_effort: ReasoningEffort;
+  available_models: ModelOption[];
+  reasoning_efforts: ReasoningEffortOption[];
   modes: ModeCapability[];
 }

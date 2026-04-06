@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..config import Settings
-from ..models import JobMode, WorkspaceWriteStrategy
+from ..models import JobMode, ReasoningEffort, WorkspaceWriteStrategy
 
 
 @dataclass(frozen=True)
@@ -16,7 +16,8 @@ class ModeSpec:
     executor: str
     description: str
     reason: str | None
-    command: list[str]
+    sandbox_mode: str | None = None
+    bypass_sandbox: bool = False
 
 
 def get_mode_spec(settings: Settings, mode: JobMode) -> ModeSpec:
@@ -30,17 +31,7 @@ def get_mode_spec(settings: Settings, mode: JobMode) -> ModeSpec:
             executor="codex-readonly-snapshot",
             description="Builds a bounded workspace snapshot and sends it to Codex in read-only mode.",
             reason=None,
-            command=[
-                settings.codex_bin,
-                "exec",
-                "--json",
-                "--color",
-                "never",
-                "--sandbox",
-                "read-only",
-                "--skip-git-repo-check",
-                "-",
-            ],
+            sandbox_mode="read-only",
         )
 
     if settings.workspace_write_strategy == WorkspaceWriteStrategy.workspace_write:
@@ -53,17 +44,7 @@ def get_mode_spec(settings: Settings, mode: JobMode) -> ModeSpec:
             executor="codex-live-workspace-write",
             description="Lets Codex inspect and edit the live workspace using the native workspace-write sandbox.",
             reason=None,
-            command=[
-                settings.codex_bin,
-                "exec",
-                "--json",
-                "--color",
-                "never",
-                "--sandbox",
-                "workspace-write",
-                "--skip-git-repo-check",
-                "-",
-            ],
+            sandbox_mode="workspace-write",
         )
 
     if settings.workspace_write_strategy == WorkspaceWriteStrategy.danger_full_access:
@@ -76,16 +57,7 @@ def get_mode_spec(settings: Settings, mode: JobMode) -> ModeSpec:
             executor="codex-live-danger-full-access",
             description="Lets Codex inspect and edit the live workspace without the native sandbox. Use only on a trusted internal host.",
             reason="This host cannot use the native Codex workspace-write sandbox, so live writes run with full access.",
-            command=[
-                settings.codex_bin,
-                "exec",
-                "--json",
-                "--color",
-                "never",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--skip-git-repo-check",
-                "-",
-            ],
+            bypass_sandbox=True,
         )
 
     return ModeSpec(
@@ -100,7 +72,6 @@ def get_mode_spec(settings: Settings, mode: JobMode) -> ModeSpec:
             "Workspace-write jobs are disabled. On this VPS the native Codex sandbox currently fails "
             "with bubblewrap networking errors, so only read-only mode is enabled by default."
         ),
-        command=[],
     )
 
 
@@ -109,3 +80,35 @@ def list_mode_specs(settings: Settings) -> list[ModeSpec]:
         get_mode_spec(settings, JobMode.read_only),
         get_mode_spec(settings, JobMode.workspace_write),
     ]
+
+
+def build_exec_command(
+    settings: Settings,
+    mode: JobMode,
+    model: str,
+    reasoning_effort: ReasoningEffort,
+) -> list[str]:
+    spec = get_mode_spec(settings, mode)
+    if not spec.enabled:
+        return []
+
+    command = [
+        settings.codex_bin,
+        "exec",
+        "--json",
+        "--color",
+        "never",
+        "--skip-git-repo-check",
+        "-m",
+        model,
+        "-c",
+        f'model_reasoning_effort="{reasoning_effort.value}"',
+    ]
+
+    if spec.bypass_sandbox:
+        command.append("--dangerously-bypass-approvals-and-sandbox")
+    elif spec.sandbox_mode:
+        command.extend(["--sandbox", spec.sandbox_mode])
+
+    command.append("-")
+    return command
