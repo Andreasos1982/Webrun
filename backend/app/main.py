@@ -11,6 +11,8 @@ from .config import get_settings
 from .models import JobRecord, JobStatus, ReasoningEffort
 from .schemas import (
     AppendMessageRequest,
+    CodexHistoryThreadResponse,
+    CodexHistoryThreadsResponse,
     CreateJobRequest,
     EventsResponse,
     FolderBrowserResponse,
@@ -23,6 +25,7 @@ from .schemas import (
     ReasoningEffortOptionResponse,
     RuntimeInfoResponse,
 )
+from .services.codex_history import CodexHistoryService
 from .services.runner import JobRunner
 from .services.modes import list_mode_specs, supports_native_resume
 from .services.storage import JobStore
@@ -31,6 +34,7 @@ from .services.storage import JobStore
 settings = get_settings()
 store = JobStore(settings.jobs_root)
 runner = JobRunner(settings, store)
+codex_history = CodexHistoryService(settings)
 
 app = FastAPI(title="Codex Web Runner", version="0.1.0")
 app.add_middleware(
@@ -205,6 +209,22 @@ def browse_folders(path: str = Query(default=".")) -> FolderBrowserResponse:
 @app.get("/api/jobs", response_model=JobsResponse)
 def list_jobs() -> JobsResponse:
     return JobsResponse(jobs=store.list_jobs())
+
+
+@app.get("/api/codex-history", response_model=CodexHistoryThreadsResponse)
+def list_codex_history(
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=40, ge=1, le=100),
+    search: str | None = Query(default=None, max_length=240),
+) -> CodexHistoryThreadsResponse:
+    return CodexHistoryThreadsResponse.model_validate(
+        codex_history.list_threads(limit=limit, cursor=cursor, search_term=search)
+    )
+
+
+@app.get("/api/codex-history/{thread_id}", response_model=CodexHistoryThreadResponse)
+def get_codex_history_thread(thread_id: str) -> CodexHistoryThreadResponse:
+    return CodexHistoryThreadResponse.model_validate(codex_history.read_thread(thread_id))
 
 
 @app.post("/api/jobs", response_model=JobRecord, status_code=201)

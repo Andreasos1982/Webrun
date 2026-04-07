@@ -131,3 +131,37 @@ class RuntimeInfoResponse(BaseModel):
     available_models: list[ModelOptionResponse]
     reasoning_efforts: list[ReasoningEffortOptionResponse]
     modes: list[ModeCapabilityResponse]
+
+
+class CodexHistoryThreadSummaryResponse(BaseModel):
+    id: str
+    name: str
+    preview: str
+    created_at: str | None
+    updated_at: str | None
+    status: str
+    source: str
+    cwd: str
+    model_provider: str | None
+    cli_version: str | None
+    path: str
+
+
+class CodexHistoryMessageResponse(BaseModel):
+    id: str
+    role: str
+    content: str
+    turn_id: str
+    turn_index: int
+    phase: str | None
+    source_item_type: str
+
+
+class CodexHistoryThreadsResponse(BaseModel):
+    threads: list[CodexHistoryThreadSummaryResponse]
+    next_cursor: str | None = None
+
+
+class CodexHistoryThreadResponse(BaseModel):
+    thread: CodexHistoryThreadSummaryResponse
+    messages: list[CodexHistoryMessageResponse]

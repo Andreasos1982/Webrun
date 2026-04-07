@@ -1,5 +1,7 @@
 import type {
   AppendMessageRequest,
+  CodexHistoryThreadDetail,
+  CodexHistoryThreadsResponse,
   CreateJobRequest,
   EventsResponse,
   FolderBrowserResponse,
@@ -82,6 +84,25 @@ export function fetchEvents(jobId: string, offset: number): Promise<EventsRespon
 
 export function fetchFolders(path = "."): Promise<FolderBrowserResponse> {
   return request<FolderBrowserResponse>(`/folders?path=${encodeURIComponent(path)}`);
+}
+
+export function listCodexHistory(
+  limit = 40,
+  cursor?: string,
+  search?: string,
+): Promise<CodexHistoryThreadsResponse> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (cursor) {
+    params.set("cursor", cursor);
+  }
+  if (search) {
+    params.set("search", search);
+  }
+  return request<CodexHistoryThreadsResponse>(`/codex-history?${params.toString()}`);
+}
+
+export function fetchCodexHistoryThread(threadId: string): Promise<CodexHistoryThreadDetail> {
+  return request<CodexHistoryThreadDetail>(`/codex-history/${encodeURIComponent(threadId)}`);
 }
 
 export function jobStreamUrl(jobId: string): string {

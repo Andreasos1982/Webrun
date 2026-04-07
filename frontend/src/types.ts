@@ -136,3 +136,37 @@ export interface RuntimeInfo {
   reasoning_efforts: ReasoningEffortOption[];
   modes: ModeCapability[];
 }
+
+export interface CodexHistoryThreadSummary {
+  id: string;
+  name: string;
+  preview: string;
+  created_at: string | null;
+  updated_at: string | null;
+  status: string;
+  source: string;
+  cwd: string;
+  model_provider: string | null;
+  cli_version: string | null;
+  path: string;
+}
+
+export interface CodexHistoryMessage {
+  id: string;
+  role: MessageRole;
+  content: string;
+  turn_id: string;
+  turn_index: number;
+  phase: string | null;
+  source_item_type: string;
+}
+
+export interface CodexHistoryThreadDetail {
+  thread: CodexHistoryThreadSummary;
+  messages: CodexHistoryMessage[];
+}
+
+export interface CodexHistoryThreadsResponse {
+  threads: CodexHistoryThreadSummary[];
+  next_cursor: string | null;
+}
