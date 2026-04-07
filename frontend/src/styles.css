@@ -421,7 +421,7 @@ textarea {
 
 .editor-lower-grid {
   display: grid;
-  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  grid-template-columns: 1fr;
   gap: 16px;
   margin-top: 16px;
   align-items: start;
@@ -543,6 +543,10 @@ textarea {
 }
 
 .composer-card {
+  padding: 12px;
+}
+
+.composer-card {
   grid-area: composer;
   position: sticky;
   bottom: 0;
@@ -550,7 +554,7 @@ textarea {
 }
 
 .composer-toolbar {
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .quick-action-row,
@@ -561,36 +565,36 @@ textarea {
 }
 
 .quick-action {
-  min-height: 30px;
-  padding: 5px 10px;
+  min-height: 26px;
+  padding: 3px 8px;
 }
 
 .composer-form {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
 }
 
 .composer-input {
-  min-height: 100px;
-  padding: 12px;
+  min-height: 84px;
+  padding: 10px;
 }
 
 .composer-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: 10px;
 }
 
 .field {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .field select {
-  min-height: 42px;
-  padding: 0 12px;
+  min-height: 34px;
+  padding: 0 10px;
 }
 
 .access-card {
@@ -611,7 +615,7 @@ textarea {
 }
 
 .scope-row {
-  margin-top: 14px;
+  margin-top: 12px;
 }
 
 .scope-row .runtime-value {
@@ -620,6 +624,14 @@ textarea {
 
 .panel-body {
   margin-top: 14px;
+}
+
+.composer-card .ghost-button,
+.composer-card .primary-button,
+.composer-card .panel-tab {
+  min-height: 30px;
+  padding-top: 5px;
+  padding-bottom: 5px;
 }
 
 .terminal-output {
