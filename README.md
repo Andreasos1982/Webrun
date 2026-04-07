@@ -13,6 +13,7 @@ The repo now contains:
 - Detached disk-backed job workers
 - Persistent chat-style sessions with alternating user / Codex messages
 - Native Codex thread capture and resume when mode + workspace scope stay compatible
+- Read-only synced Codex history import through `codex app-server`
 - Built frontend served by FastAPI for single-origin production deploys
 - Persistent job metadata under `data/jobs/`
 - Readable logs in `output.log`
@@ -25,6 +26,7 @@ The repo now contains:
 The browser surface is now organized around a persistent session instead of a single one-off prompt:
 
 - left sidebar for sessions
+- second sidebar lane for synced Codex history
 - center workspace console with latest output, file changes, and thread state
 - right-side chat thread with alternating user and Codex messages
 - composer controls for:
@@ -41,6 +43,21 @@ Why this shape:
 - it lets you follow a conversation over multiple turns
 - it keeps per-turn runner settings visible and persistent
 - it keeps the active Codex thread resumable when the mode and folder scope stay aligned
+
+## Synced Codex History
+
+`webrun` can now surface read-only Codex threads that were created outside this app, matching the broader history visible in the Codex VS Code extension much more closely than a local `~/.codex/sessions` import would.
+
+Implementation notes:
+
+- backend bridges to the local experimental `codex app-server`
+- `thread/list` powers the synced history list
+- `thread/read` powers the read-only transcript view
+- imported history is intentionally read-only in `webrun` for now
+
+Important caveat:
+
+This integration depends on the current experimental `codex app-server` protocol exposed by the installed CLI, so it is useful and working on this VPS, but more fragile than the main job runner API.
 
 ## Native Threads And Slash Commands
 
@@ -284,6 +301,7 @@ If `workspace-write` is disabled, the smoke script will fail fast with the API e
 For manual verification in the browser:
 
 - open a session
+- open a synced Codex history thread from the sidebar and confirm the transcript renders
 - change the model / reasoning effort / access dropdowns
 - choose a folder with `Choose Folder`
 - toggle `Limit to the open folder`
@@ -298,6 +316,8 @@ For manual verification in the browser:
 - `GET /api/runtime`
 - `GET /api/folders?path=.`
 - `GET /api/jobs`
+- `GET /api/codex-history`
+- `GET /api/codex-history/{thread_id}`
 - `POST /api/jobs`
 - `POST /api/jobs/{job_id}/messages`
 - `POST /api/jobs/{job_id}/cancel`
