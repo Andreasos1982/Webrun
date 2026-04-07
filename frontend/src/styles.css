@@ -394,9 +394,8 @@ textarea {
   grid-template-areas:
     "header"
     "transcript"
-    "inspector"
     "composer";
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 14px;
   padding: 18px;
   background:
@@ -418,6 +417,14 @@ textarea {
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr);
   gap: 16px;
+}
+
+.editor-lower-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: 16px;
+  margin-top: 16px;
+  align-items: start;
 }
 
 .stage-card {
@@ -542,10 +549,6 @@ textarea {
   z-index: 2;
 }
 
-.panel-surface {
-  grid-area: inspector;
-}
-
 .composer-toolbar {
   margin-bottom: 12px;
 }
@@ -668,6 +671,10 @@ textarea {
   }
 
   .stage-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .editor-lower-grid {
     grid-template-columns: 1fr;
   }
 

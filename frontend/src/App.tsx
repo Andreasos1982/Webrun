@@ -879,6 +879,132 @@ export default function App() {
                 </div>
               </article>
             </div>
+
+            <div className="editor-lower-grid">
+              <section className="access-card">
+                <div className="mode-card-top">
+                  <div>
+                    <p className="section-label">Access</p>
+                    <h3>{getAccessLabel(selectedModeCapability)}</h3>
+                  </div>
+                  <div className="title-bar-meta">
+                    {selectedModeCapability ? (
+                      <span className={`mode-state ${selectedModeCapability.mode}`}>
+                        {selectedModeCapability.launch_strategy}
+                      </span>
+                    ) : null}
+                    {selectedModeCapability?.dangerous ? (
+                      <span className="danger-pill">Host-wide</span>
+                    ) : null}
+                  </div>
+                </div>
+                <p className="sidebar-copy">{getAccessDescription(selectedModeCapability)}</p>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={limitToOpenFolder}
+                    onChange={(event) => setLimitToOpenFolder(event.target.checked)}
+                  />
+                  <span>Limit to the open folder</span>
+                </label>
+                <div className="scope-row">
+                  <div>
+                    <span className="runtime-key">Open folder</span>
+                    <p className="runtime-value">{openFolder}</p>
+                  </div>
+                  <button className="ghost-button" type="button" onClick={() => void openFolderDialog()}>
+                    Change
+                  </button>
+                </div>
+              </section>
+
+              <section className="panel-surface">
+                <div className="panel-header">
+                  <div className="panel-tabs">
+                    {(["logs", "events", "details"] as PanelTab[]).map((tab) => (
+                      <button
+                        key={tab}
+                        className={`panel-tab ${activePanel === tab ? "active" : ""}`}
+                        type="button"
+                        onClick={() => setActivePanel(tab)}
+                      >
+                        {panelTitle(tab)}
+                      </button>
+                    ))}
+                  </div>
+                  {selectedJob ? (
+                    <span className={`status-pill ${selectedJob.status}`}>{selectedJob.status}</span>
+                  ) : null}
+                </div>
+
+                <div className="panel-body">
+                  {activePanel === "logs" ? (
+                    <pre className="terminal-output">{logs || "No logs yet."}</pre>
+                  ) : null}
+                  {activePanel === "events" ? (
+                    <pre className="terminal-output">{events || "No events yet."}</pre>
+                  ) : null}
+                  {activePanel === "details" ? (
+                    <div className="detail-list">
+                      <div className="detail-row">
+                        <span className="detail-key">Session</span>
+                        <span className="detail-value">{selectedJob?.id ?? "new"}</span>
+                      </div>
+                      <div className="detail-row">
+                        <span className="detail-key">Model</span>
+                        <span className="detail-value">{selectedJob?.model ?? model}</span>
+                      </div>
+                      <div className="detail-row">
+                        <span className="detail-key">Reasoning</span>
+                        <span className="detail-value">
+                          {selectedJob?.reasoning_effort ?? reasoningEffort}
+                        </span>
+                      </div>
+                      <div className="detail-row">
+                        <span className="detail-key">Created</span>
+                        <span className="detail-value">
+                          {selectedJob ? formatDate(selectedJob.created_at) : "Not started"}
+                        </span>
+                      </div>
+                      <div className="detail-row">
+                        <span className="detail-key">Updated</span>
+                        <span className="detail-value">
+                          {selectedJob ? formatDate(selectedJob.updated_at) : "n/a"}
+                        </span>
+                      </div>
+                      <div className="detail-row">
+                        <span className="detail-key">Open folder</span>
+                        <span className="detail-value">{selectedJob?.open_folder ?? openFolder}</span>
+                      </div>
+                      <div className="detail-row">
+                        <span className="detail-key">Native thread</span>
+                        <span className="detail-value">{shortThreadId(selectedJob?.thread_id ?? null)}</span>
+                      </div>
+                      <div className="detail-row">
+                        <span className="detail-key">Thread scope</span>
+                        <span className="detail-value">
+                          {selectedJob?.thread_open_folder ?? "not established"}
+                        </span>
+                      </div>
+                      <div className="detail-row">
+                        <span className="detail-key">Limit scope</span>
+                        <span className="detail-value">
+                          {(selectedJob?.thread_limit_to_open_folder ?? limitToOpenFolder)
+                            ? "Enabled"
+                            : "Disabled"}
+                        </span>
+                      </div>
+                      <div className="detail-row">
+                        <span className="detail-key">Worker PID</span>
+                        <span className="detail-value">
+                          {selectedJob?.worker_pid ?? "n/a"}
+                        </span>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </section>
+            </div>
           </section>
 
           <aside className="chat-pane">
@@ -1014,43 +1140,6 @@ export default function App() {
                   </label>
                 </div>
 
-                <div className="access-card">
-                  <div className="mode-card-top">
-                    <div>
-                      <p className="section-label">Access</p>
-                      <h3>{getAccessLabel(selectedModeCapability)}</h3>
-                    </div>
-                    <div className="title-bar-meta">
-                      {selectedModeCapability ? (
-                        <span className={`mode-state ${selectedModeCapability.mode}`}>
-                          {selectedModeCapability.launch_strategy}
-                        </span>
-                      ) : null}
-                      {selectedModeCapability?.dangerous ? (
-                        <span className="danger-pill">Host-wide</span>
-                      ) : null}
-                    </div>
-                  </div>
-                  <p className="sidebar-copy">{getAccessDescription(selectedModeCapability)}</p>
-                  <label className="checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={limitToOpenFolder}
-                      onChange={(event) => setLimitToOpenFolder(event.target.checked)}
-                    />
-                    <span>Limit to the open folder</span>
-                  </label>
-                  <div className="scope-row">
-                    <div>
-                      <span className="runtime-key">Open folder</span>
-                      <p className="runtime-value">{openFolder}</p>
-                    </div>
-                    <button className="ghost-button" type="button" onClick={() => void openFolderDialog()}>
-                      Change
-                    </button>
-                  </div>
-                </div>
-
                 <div className="composer-footer">
                   <div className="status-bar">
                     <span className="message-chip">Lokal</span>
@@ -1081,93 +1170,6 @@ export default function App() {
                   </div>
                 </div>
               </form>
-            </section>
-
-            <section className="panel-surface">
-              <div className="panel-header">
-                <div className="panel-tabs">
-                  {(["logs", "events", "details"] as PanelTab[]).map((tab) => (
-                    <button
-                      key={tab}
-                      className={`panel-tab ${activePanel === tab ? "active" : ""}`}
-                      type="button"
-                      onClick={() => setActivePanel(tab)}
-                    >
-                      {panelTitle(tab)}
-                    </button>
-                  ))}
-                </div>
-                {selectedJob ? (
-                  <span className={`status-pill ${selectedJob.status}`}>{selectedJob.status}</span>
-                ) : null}
-              </div>
-
-              <div className="panel-body">
-                {activePanel === "logs" ? (
-                  <pre className="terminal-output">{logs || "No logs yet."}</pre>
-                ) : null}
-                {activePanel === "events" ? (
-                  <pre className="terminal-output">{events || "No events yet."}</pre>
-                ) : null}
-                {activePanel === "details" ? (
-                  <div className="detail-list">
-                    <div className="detail-row">
-                      <span className="detail-key">Session</span>
-                      <span className="detail-value">{selectedJob?.id ?? "new"}</span>
-                    </div>
-                    <div className="detail-row">
-                      <span className="detail-key">Model</span>
-                      <span className="detail-value">{selectedJob?.model ?? model}</span>
-                    </div>
-                    <div className="detail-row">
-                      <span className="detail-key">Reasoning</span>
-                      <span className="detail-value">
-                        {selectedJob?.reasoning_effort ?? reasoningEffort}
-                      </span>
-                    </div>
-                    <div className="detail-row">
-                      <span className="detail-key">Created</span>
-                      <span className="detail-value">
-                        {selectedJob ? formatDate(selectedJob.created_at) : "Not started"}
-                      </span>
-                    </div>
-                    <div className="detail-row">
-                      <span className="detail-key">Updated</span>
-                      <span className="detail-value">
-                        {selectedJob ? formatDate(selectedJob.updated_at) : "n/a"}
-                      </span>
-                    </div>
-                    <div className="detail-row">
-                      <span className="detail-key">Open folder</span>
-                      <span className="detail-value">{selectedJob?.open_folder ?? openFolder}</span>
-                    </div>
-                    <div className="detail-row">
-                      <span className="detail-key">Native thread</span>
-                      <span className="detail-value">{shortThreadId(selectedJob?.thread_id ?? null)}</span>
-                    </div>
-                    <div className="detail-row">
-                      <span className="detail-key">Thread scope</span>
-                      <span className="detail-value">
-                        {selectedJob?.thread_open_folder ?? "not established"}
-                      </span>
-                    </div>
-                    <div className="detail-row">
-                      <span className="detail-key">Limit scope</span>
-                      <span className="detail-value">
-                        {(selectedJob?.thread_limit_to_open_folder ?? limitToOpenFolder)
-                          ? "Enabled"
-                          : "Disabled"}
-                      </span>
-                    </div>
-                    <div className="detail-row">
-                      <span className="detail-key">Worker PID</span>
-                      <span className="detail-value">
-                        {selectedJob?.worker_pid ?? "n/a"}
-                      </span>
-                    </div>
-                  </div>
-                ) : null}
-              </div>
             </section>
           </aside>
         </main>
