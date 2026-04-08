@@ -250,6 +250,10 @@ class JobStore:
             job.thread_limit_to_open_folder = job.limit_to_open_folder
             updated = True
 
+        if job.thread_active_flags is None:
+            job.thread_active_flags = []
+            updated = True
+
         if not job.messages and job.prompt:
             job.messages.append(
                 ConversationMessage(

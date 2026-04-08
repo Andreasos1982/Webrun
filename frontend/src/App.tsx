@@ -187,6 +187,10 @@ function historySourceLabel(source: string): string {
   return source;
 }
 
+function threadHasCompactingFlag(activeFlags: string[] | null | undefined): boolean {
+  return (activeFlags ?? []).some((flag) => flag.toLowerCase().includes("compact"));
+}
+
 export default function App() {
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
@@ -246,6 +250,11 @@ export default function App() {
     ? getModeCapability(runtime, activeRunJob.mode)
     : null;
   const selectedJobBusy = activeRunJob ? isBusy(activeRunJob.status) : false;
+  const selectedThreadActiveFlags =
+    activeRunJob?.thread_active_flags.length
+      ? activeRunJob.thread_active_flags
+      : selectedHistorySummary?.active_flags ?? [];
+  const selectedThreadIsCompacting = threadHasCompactingFlag(selectedThreadActiveFlags);
   const activeJobId = activeRunJob?.id ?? null;
   const canSubmit =
     Boolean(prompt.trim()) &&
@@ -984,6 +993,14 @@ export default function App() {
                   <div className="job-item-meta">
                     <span className="status-pill">{historySourceLabel(thread.source)}</span>
                     <span className="message-chip">{thread.status}</span>
+                    {threadHasCompactingFlag(thread.active_flags) ? (
+                      <span
+                        className="message-chip compacting-chip"
+                        title="Codex automatically compacts itself when the thread gets long."
+                      >
+                        Compacting
+                      </span>
+                    ) : null}
                   </div>
                   <h3 className="job-item-title">{thread.name}</h3>
                   <p className="job-item-prompt">
@@ -1040,6 +1057,14 @@ export default function App() {
               <div className="title-bar-meta">
                 <span className="message-chip">{selectedHistorySummary ? "Synced" : "Draft"}</span>
                 <span className={`stream-pill ${streamState}`}>{streamLabel(streamState)}</span>
+                {selectedThreadIsCompacting ? (
+                  <span
+                    className="message-chip compacting-chip"
+                    title="Codex automatically compacts itself when the thread gets long."
+                  >
+                    Compacting
+                  </span>
+                ) : null}
                 {selectedHistorySummary ? (
                   <span className="message-chip">{historySourceLabel(selectedHistorySummary.source)}</span>
                 ) : null}
@@ -1151,6 +1176,16 @@ export default function App() {
                       </span>
                     </div>
                     <div className="detail-row">
+                      <span className="detail-key">Thread activity</span>
+                      <span className="detail-value">
+                        {selectedThreadIsCompacting
+                          ? "Compacting"
+                          : selectedThreadActiveFlags.length
+                            ? selectedThreadActiveFlags.join(", ")
+                            : "Idle"}
+                      </span>
+                    </div>
+                    <div className="detail-row">
                       <span className="detail-key">Source</span>
                       <span className="detail-value">
                         {selectedHistorySummary
@@ -1210,6 +1245,14 @@ export default function App() {
                           : activeRunJob.return_code}
                       </span>
                     </div>
+                    {activeRunJob?.thread_compacted_at ? (
+                      <div className="detail-row">
+                        <span className="detail-key">Last compaction</span>
+                        <span className="detail-value">
+                          {formatDate(activeRunJob.thread_compacted_at)}
+                        </span>
+                      </div>
+                    ) : null}
                     {selectedHistorySummary?.cli_version ? (
                       <div className="detail-row">
                         <span className="detail-key">CLI version</span>

@@ -158,6 +158,7 @@ class CodexHistoryThreadSummaryResponse(BaseModel):
     created_at: str | None
     updated_at: str | None
     status: str
+    active_flags: list[str] = Field(default_factory=list)
     source: str
     cwd: str
     model_provider: str | None

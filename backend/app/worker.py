@@ -235,6 +235,22 @@ class JobWorker:
             "- When something is blocked or uncertain, say so directly and explain what is missing.\n"
         )
 
+    def _normalize_thread_active_flags(self, raw_flags: object) -> list[str]:
+        if not isinstance(raw_flags, list):
+            return []
+
+        flags: list[str] = []
+        for item in raw_flags:
+            if not isinstance(item, str):
+                continue
+            flag = item.strip()
+            if flag and flag not in flags:
+                flags.append(flag)
+        return flags
+
+    def _thread_is_compacting(self, active_flags: list[str]) -> bool:
+        return any("compact" in flag.lower() for flag in active_flags)
+
     def _build_thread_instructions(self, job: JobRecord, mode_spec: ModeSpec, parsed_turn: ParsedTurn) -> str:
         open_folder_line = f"Open folder: {job.open_folder} ({job.cwd})"
         folder_guardrail = ""
@@ -302,6 +318,9 @@ class JobWorker:
         turn_error: str | None = None
         thread_idle = False
         idle_observed_at: float | None = None
+        thread_status = job.thread_status
+        thread_active_flags = list(job.thread_active_flags)
+        compacted_at = job.thread_compacted_at
 
         with CodexAppServerClient(self.settings, timeout_seconds=30.0) as client:
             self._active_process = client.process
@@ -340,6 +359,7 @@ class JobWorker:
 
             def handle_message(message: dict) -> None:
                 nonlocal final_output, thread_id, turn_completed, turn_error, turn_id, thread_idle, idle_observed_at
+                nonlocal thread_status, thread_active_flags, compacted_at
                 payload = json.dumps(message, ensure_ascii=False)
                 self.store.append_event(job.id, payload)
                 rendered = self._render_event(payload, cwd=job.cwd)
@@ -362,6 +382,19 @@ class JobWorker:
                     params = message.get("params") or {}
                     status = params.get("status") or {}
                     status_type = status.get("type") if isinstance(status, dict) else status
+                    next_flags = self._normalize_thread_active_flags(
+                        status.get("activeFlags") if isinstance(status, dict) else []
+                    )
+                    thread_status = status_type if isinstance(status_type, str) else str(status_type or "unknown")
+                    thread_active_flags = next_flags
+                    if self._thread_is_compacting(next_flags):
+                        compacted_at = utc_now()
+                    live_job = self.store.get_job(job.id)
+                    live_job.thread_status = thread_status
+                    live_job.thread_active_flags = thread_active_flags
+                    live_job.thread_compacted_at = compacted_at
+                    live_job.updated_at = utc_now()
+                    self.store.save_job(live_job)
                     if status_type == "idle":
                         thread_idle = True
                         idle_observed_at = time.monotonic()
@@ -427,6 +460,9 @@ class JobWorker:
         completed_job.thread_cwd = completed_job.cwd
         completed_job.thread_open_folder = completed_job.open_folder
         completed_job.thread_limit_to_open_folder = completed_job.limit_to_open_folder
+        completed_job.thread_status = thread_status
+        completed_job.thread_active_flags = thread_active_flags
+        completed_job.thread_compacted_at = compacted_at
 
         completed_job.status = JobStatus.succeeded if not turn_error else JobStatus.failed
         completed_job.error = turn_error
@@ -793,9 +829,12 @@ class JobWorker:
 
         if method == "thread/status/changed":
             status = params.get("status") or {}
+            active_flags: list[str] = []
             if isinstance(status, dict):
+                active_flags = self._normalize_thread_active_flags(status.get("activeFlags"))
                 status = status.get("type")
-            return RenderedEvent(log_line=f"[system] Thread status: {status or 'unknown'}")
+            suffix = f" ({', '.join(active_flags)})" if active_flags else ""
+            return RenderedEvent(log_line=f"[system] Thread status: {status or 'unknown'}{suffix}")
 
         if method == "turn/started":
             return RenderedEvent(log_line="[system] Codex turn started")

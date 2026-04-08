@@ -42,6 +42,9 @@ export interface JobRecord {
   thread_cwd: string | null;
   thread_open_folder: string | null;
   thread_limit_to_open_folder: boolean | null;
+  thread_status: string | null;
+  thread_active_flags: string[];
+  thread_compacted_at: string | null;
   cancel_requested_at: string | null;
   turn_count: number;
   messages: ConversationMessage[];
@@ -148,6 +151,7 @@ export interface CodexHistoryThreadSummary {
   created_at: string | null;
   updated_at: string | null;
   status: string;
+  active_flags: string[];
   source: string;
   cwd: string;
   model_provider: string | null;

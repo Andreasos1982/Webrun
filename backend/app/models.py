@@ -75,6 +75,9 @@ class JobRecord(BaseModel):
     thread_cwd: str | None = None
     thread_open_folder: str | None = None
     thread_limit_to_open_folder: bool | None = None
+    thread_status: str | None = None
+    thread_active_flags: list[str] = Field(default_factory=list)
+    thread_compacted_at: str | None = None
     cancel_requested_at: str | None = None
     turn_count: int = 0
     messages: list[ConversationMessage] = Field(default_factory=list)

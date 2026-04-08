@@ -40,6 +40,7 @@ Practical consequence:
 - synced Codex history is the main session source in the UI
 - new chats are created as native synced Codex threads
 - follow-up turns resume the same native thread when scope and mode are compatible
+- native thread activity such as `compacting` is now surfaced in the UI instead of being hidden in raw events
 - mobile scrolling was repaired
 - mobile composer controls were compacted
 - the current UI branch also contains pane/collapse work for the workspace console

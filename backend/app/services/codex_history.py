@@ -263,6 +263,7 @@ class CodexHistoryService:
             "created_at": _normalize_timestamp(thread.get("createdAt")),
             "updated_at": _normalize_timestamp(thread.get("updatedAt")),
             "status": self._normalize_status(thread.get("status")),
+            "active_flags": self._extract_active_flags(thread.get("status")),
             "source": _normalize_text(thread.get("source")) or "unknown",
             "cwd": _normalize_text(thread.get("cwd")) or "",
             "model_provider": _normalize_text(thread.get("modelProvider")),
@@ -389,3 +390,18 @@ class CodexHistoryService:
             if status_type:
                 return status_type
         return _normalize_text(value) or "unknown"
+
+    def _extract_active_flags(self, value: Any) -> list[str]:
+        if not isinstance(value, dict):
+            return []
+
+        raw_flags = value.get("activeFlags")
+        if not isinstance(raw_flags, list):
+            return []
+
+        flags: list[str] = []
+        for item in raw_flags:
+            text = _normalize_text(item)
+            if text and text not in flags:
+                flags.append(text)
+        return flags
