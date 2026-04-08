@@ -318,6 +318,8 @@ class JobWorker:
         turn_error: str | None = None
         thread_idle = False
         idle_observed_at: float | None = None
+        last_event_at = time.monotonic()
+        final_answer_seen = False
         thread_status = job.thread_status
         thread_active_flags = list(job.thread_active_flags)
         compacted_at = job.thread_compacted_at
@@ -359,7 +361,8 @@ class JobWorker:
 
             def handle_message(message: dict) -> None:
                 nonlocal final_output, thread_id, turn_completed, turn_error, turn_id, thread_idle, idle_observed_at
-                nonlocal thread_status, thread_active_flags, compacted_at
+                nonlocal thread_status, thread_active_flags, compacted_at, last_event_at, final_answer_seen
+                last_event_at = time.monotonic()
                 payload = json.dumps(message, ensure_ascii=False)
                 self.store.append_event(job.id, payload)
                 rendered = self._render_event(payload, cwd=job.cwd)
@@ -378,6 +381,13 @@ class JobWorker:
                     turn_error = completed_turn.get("error") or turn_error
                     if not turn_id or completed_turn.get("id") == turn_id:
                         turn_completed = True
+                elif message.get("method") == "item/completed":
+                    params = message.get("params") or {}
+                    item = params.get("item") or {}
+                    if isinstance(item, dict) and item.get("type") == "agentMessage":
+                        phase = item.get("phase")
+                        if isinstance(phase, str) and phase.strip().lower() == "final_answer":
+                            final_answer_seen = True
                 elif message.get("method") == "thread/status/changed":
                     params = message.get("params") or {}
                     status = params.get("status") or {}
@@ -429,12 +439,23 @@ class JobWorker:
             while not turn_completed:
                 message = client.read_message(timeout_seconds=0.5)
                 if message is None:
+                    now = time.monotonic()
                     if (
                         thread_idle
                         and idle_observed_at is not None
-                        and time.monotonic() - idle_observed_at >= 0.75
+                        and now - idle_observed_at >= 0.75
                         and (final_output is not None or turn_error is not None)
                     ):
+                        turn_completed = True
+                    elif (
+                        final_answer_seen
+                        and final_output is not None
+                        and now - last_event_at >= 1.0
+                    ):
+                        # Some native thread runs emit the final answer but never send
+                        # a matching turn/completed or idle status transition. After a
+                        # short quiet period, treat the turn as complete so the UI does
+                        # not get stuck in a permanent running state.
                         turn_completed = True
                     continue
                 handle_message(message)
