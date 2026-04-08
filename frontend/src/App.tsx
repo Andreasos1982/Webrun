@@ -109,7 +109,7 @@ function getAccessLabel(capability: ModeCapability | null): string {
     return "Zugriff";
   }
   if (capability.mode === "read-only") {
-    return "Mit Beschrankungen";
+    return "Begrenzt";
   }
   return capability.dangerous ? "Vollzugriff" : "Agent";
 }
@@ -1485,7 +1485,7 @@ export default function App() {
                   </label>
 
                   <label className="field">
-                    <span className="field-label">Denkaufwand</span>
+                    <span className="field-label">Denken</span>
                     <select
                       value={reasoningEffort}
                       onChange={(event) =>
