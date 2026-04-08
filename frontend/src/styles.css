@@ -798,10 +798,23 @@ textarea {
   .title-bar,
   .chat-header,
   .scope-row,
-  .composer-footer,
   .panel-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .composer-footer {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .status-bar,
+  .composer-actions {
+    justify-content: flex-end;
+    flex-wrap: wrap;
   }
 
   .message-card.user,
