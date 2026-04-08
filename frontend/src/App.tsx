@@ -158,12 +158,6 @@ function streamLabel(state: StreamState): string {
   return "Idle";
 }
 
-function latestTranscriptAssistantMessage(
-  messages: TranscriptMessage[],
-): TranscriptMessage | null {
-  return [...messages].reverse().find((message) => message.role === "assistant") ?? null;
-}
-
 function isConversationMessage(
   message: TranscriptMessage,
 ): message is ConversationMessage {
@@ -220,6 +214,9 @@ export default function App() {
   const [folderBrowser, setFolderBrowser] = useState<FolderBrowserResponse | null>(null);
   const [folderLoading, setFolderLoading] = useState(false);
   const [folderError, setFolderError] = useState<string | null>(null);
+  const [originCollapsed, setOriginCollapsed] = useState(false);
+  const [contextCollapsed, setContextCollapsed] = useState(false);
+  const [viewportScrollPercent, setViewportScrollPercent] = useState(0);
   const seededRunKeyRef = useRef<string | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
@@ -249,7 +246,6 @@ export default function App() {
     ? getModeCapability(runtime, activeRunJob.mode)
     : null;
   const selectedJobBusy = activeRunJob ? isBusy(activeRunJob.status) : false;
-  const latestAssistant = latestTranscriptAssistantMessage(selectedTranscriptMessages);
   const activeJobId = activeRunJob?.id ?? null;
   const canSubmit =
     Boolean(prompt.trim()) &&
@@ -689,6 +685,48 @@ export default function App() {
     activeRunJob?.updated_at,
   ]);
 
+  useEffect(() => {
+    const updateViewportScroll = () => {
+      const maxScroll = Math.max(
+        document.documentElement.scrollHeight - window.innerHeight,
+        0,
+      );
+      setViewportScrollPercent(maxScroll > 0 ? (window.scrollY / maxScroll) * 100 : 0);
+    };
+
+    updateViewportScroll();
+    window.addEventListener("scroll", updateViewportScroll, { passive: true });
+    window.addEventListener("resize", updateViewportScroll);
+
+    return () => {
+      window.removeEventListener("scroll", updateViewportScroll);
+      window.removeEventListener("resize", updateViewportScroll);
+    };
+  }, []);
+
+  useEffect(() => {
+    const frameId = window.requestAnimationFrame(() => {
+      const maxScroll = Math.max(
+        document.documentElement.scrollHeight - window.innerHeight,
+        0,
+      );
+      setViewportScrollPercent(maxScroll > 0 ? (window.scrollY / maxScroll) * 100 : 0);
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [
+    historyThreads.length,
+    selectedTranscriptMessages.length,
+    selectionKind,
+    activePanel,
+    logs.length,
+    events.length,
+    originCollapsed,
+    contextCollapsed,
+  ]);
+
   async function loadFolderBrowser(path: string) {
     setFolderLoading(true);
     setFolderError(null);
@@ -753,6 +791,17 @@ export default function App() {
     setOpenFolder(path);
     setFolderDialogOpen(false);
     setFolderError(null);
+  }
+
+  function handleViewportScroll(nextPercent: number) {
+    const maxScroll = Math.max(
+      document.documentElement.scrollHeight - window.innerHeight,
+      0,
+    );
+    window.scrollTo({
+      top: (Math.max(0, Math.min(nextPercent, 100)) / 100) * maxScroll,
+      behavior: "auto",
+    });
   }
 
   async function submitPrompt(overridePrompt?: string) {
@@ -840,6 +889,19 @@ export default function App() {
 
   return (
     <>
+      <div className="viewport-scroll-rail">
+        <input
+          aria-label="Scroll the full window"
+          className="viewport-scroll-input"
+          type="range"
+          min="0"
+          max="100"
+          step="1"
+          value={viewportScrollPercent}
+          onChange={(event) => handleViewportScroll(Number(event.target.value))}
+        />
+      </div>
+
       <div className="app-shell">
         <aside className="activity-bar">
           <div className="activity-brand">WR</div>
@@ -907,7 +969,7 @@ export default function App() {
               <span className="section-count">{historyThreads.length}</span>
             </div>
 
-            <div className="job-list">
+            <div className="job-list thread-list-window">
               {historyThreads.map((thread) => (
                 <button
                   key={thread.id}
@@ -994,33 +1056,7 @@ export default function App() {
             ) : null}
 
             <div className="stage-grid">
-              <article className="stage-card stage-hero">
-                <div className="section-heading">
-                  <div>
-                    <p className="section-label">Latest Assistant Message</p>
-                    <h3>Codex output preview</h3>
-                  </div>
-                  {selectedHistorySummary || activeRunJob ? (
-                    <span
-                      className={`status-pill ${activeRunJob?.status ?? selectedHistorySummary?.status ?? ""}`}
-                    >
-                      {activeRunJob?.status ?? selectedHistorySummary?.status}
-                    </span>
-                  ) : null}
-                </div>
-                {latestAssistant ? (
-                  <pre className="stage-output">{latestAssistant.content}</pre>
-                ) : (
-                  <div className="stage-empty">
-                    <p className="sidebar-copy">
-                      Assistant replies land here and stay in the chat transcript on the
-                      right.
-                    </p>
-                  </div>
-                )}
-              </article>
-
-              <article className="stage-card">
+              <article className={`stage-card ${originCollapsed ? "collapsed" : ""}`}>
                 <div className="section-heading">
                   <div>
                     <p className="section-label">
@@ -1037,8 +1073,15 @@ export default function App() {
                         ? historySourceLabel(selectedHistorySummary.source)
                         : 0}
                   </span>
+                  <button
+                    className="ghost-button collapse-button"
+                    type="button"
+                    onClick={() => setOriginCollapsed((current) => !current)}
+                  >
+                    {originCollapsed ? "Einblenden" : "Einklappen"}
+                  </button>
                 </div>
-                {activeRunJob?.changed_files.length ? (
+                {!originCollapsed && activeRunJob?.changed_files.length ? (
                   <div className="file-list">
                     {activeRunJob.changed_files.map((file) => (
                       <div key={file} className="file-item">
@@ -1046,7 +1089,8 @@ export default function App() {
                       </div>
                     ))}
                   </div>
-                ) : selectedHistorySummary ? (
+                ) : null}
+                {!originCollapsed && selectedHistorySummary && !activeRunJob?.changed_files.length ? (
                   <div className="detail-list">
                     <div className="detail-row">
                       <span className="detail-key">Source</span>
@@ -1071,14 +1115,17 @@ export default function App() {
                       </span>
                     </div>
                   </div>
-                ) : (
+                ) : null}
+                {!originCollapsed &&
+                !selectedHistorySummary &&
+                !activeRunJob?.changed_files.length ? (
                   <p className="sidebar-copy">
                     No file changes or synced thread metadata available yet.
                   </p>
-                )}
+                ) : null}
               </article>
 
-              <article className="stage-card">
+              <article className={`stage-card ${contextCollapsed ? "collapsed" : ""}`}>
                 <div className="section-heading">
                   <div>
                     <p className="section-label">Thread State</p>
@@ -1087,81 +1134,90 @@ export default function App() {
                   {selectedRunCapability?.dangerous ? (
                     <span className="danger-pill">Full access</span>
                   ) : null}
+                  <button
+                    className="ghost-button collapse-button"
+                    type="button"
+                    onClick={() => setContextCollapsed((current) => !current)}
+                  >
+                    {contextCollapsed ? "Einblenden" : "Einklappen"}
+                  </button>
                 </div>
-                <div className="detail-list">
-                  <div className="detail-row">
-                    <span className="detail-key">Status</span>
-                    <span className="detail-value">
-                      {activeRunJob?.status ?? selectedHistorySummary?.status ?? "draft"}
-                    </span>
-                  </div>
-                  <div className="detail-row">
-                    <span className="detail-key">Source</span>
-                    <span className="detail-value">
-                      {selectedHistorySummary
-                        ? historySourceLabel(selectedHistorySummary.source)
-                        : "New synced chat"}
-                    </span>
-                  </div>
-                  <div className="detail-row">
-                    <span className="detail-key">Created</span>
-                    <span className="detail-value">
-                      {selectedHistorySummary
-                        ? formatDate(selectedHistorySummary.created_at)
-                        : activeRunJob
-                          ? formatDate(activeRunJob.created_at)
-                          : "Not started"}
-                    </span>
-                  </div>
-                  <div className="detail-row">
-                    <span className="detail-key">Updated</span>
-                    <span className="detail-value">
-                      {selectedHistorySummary
-                        ? formatDate(selectedHistorySummary.updated_at)
-                        : activeRunJob
-                          ? formatDate(activeRunJob.updated_at)
-                          : "n/a"}
-                    </span>
-                  </div>
-                  <div className="detail-row">
-                    <span className="detail-key">Native thread</span>
-                    <span className="detail-value">
-                      {shortThreadId(selectedHistorySummary?.id ?? activeRunJob?.thread_id ?? null)}
-                    </span>
-                  </div>
-                  <div className="detail-row">
-                    <span className="detail-key">Open folder</span>
-                    <span className="detail-value">
-                      {activeRunJob?.open_folder ?? openFolder}
-                    </span>
-                  </div>
-                  <div className="detail-row">
-                    <span className="detail-key">Limit scope</span>
-                    <span className="detail-value">
-                      {(activeRunJob?.limit_to_open_folder ?? limitToOpenFolder)
-                        ? "Enabled"
-                        : "Disabled"}
-                    </span>
-                  </div>
-                  <div className="detail-row">
-                    <span className="detail-key">Executor</span>
-                    <span className="detail-value">{activeRunJob?.executor ?? "pending"}</span>
-                  </div>
-                  <div className="detail-row">
-                    <span className="detail-key">Return code</span>
-                    <span className="detail-value">
-                      {activeRunJob?.return_code === null || activeRunJob?.return_code === undefined
-                        ? "n/a"
-                        : activeRunJob.return_code}
-                    </span>
-                  </div>
-                  {selectedHistorySummary?.cli_version ? (
+                {!contextCollapsed ? (
+                  <div className="detail-list">
                     <div className="detail-row">
-                      <span className="detail-key">CLI version</span>
-                      <span className="detail-value">{selectedHistorySummary.cli_version}</span>
+                      <span className="detail-key">Status</span>
+                      <span className="detail-value">
+                        {activeRunJob?.status ?? selectedHistorySummary?.status ?? "draft"}
+                      </span>
                     </div>
-                  ) : null}
-                </div>
+                    <div className="detail-row">
+                      <span className="detail-key">Source</span>
+                      <span className="detail-value">
+                        {selectedHistorySummary
+                          ? historySourceLabel(selectedHistorySummary.source)
+                          : "New synced chat"}
+                      </span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-key">Created</span>
+                      <span className="detail-value">
+                        {selectedHistorySummary
+                          ? formatDate(selectedHistorySummary.created_at)
+                          : activeRunJob
+                            ? formatDate(activeRunJob.created_at)
+                            : "Not started"}
+                      </span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-key">Updated</span>
+                      <span className="detail-value">
+                        {selectedHistorySummary
+                          ? formatDate(selectedHistorySummary.updated_at)
+                          : activeRunJob
+                            ? formatDate(activeRunJob.updated_at)
+                            : "n/a"}
+                      </span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-key">Native thread</span>
+                      <span className="detail-value">
+                        {shortThreadId(selectedHistorySummary?.id ?? activeRunJob?.thread_id ?? null)}
+                      </span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-key">Open folder</span>
+                      <span className="detail-value">
+                        {activeRunJob?.open_folder ?? openFolder}
+                      </span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-key">Limit scope</span>
+                      <span className="detail-value">
+                        {(activeRunJob?.limit_to_open_folder ?? limitToOpenFolder)
+                          ? "Enabled"
+                          : "Disabled"}
+                      </span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-key">Executor</span>
+                      <span className="detail-value">{activeRunJob?.executor ?? "pending"}</span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-key">Return code</span>
+                      <span className="detail-value">
+                        {activeRunJob?.return_code === null || activeRunJob?.return_code === undefined
+                          ? "n/a"
+                          : activeRunJob.return_code}
+                      </span>
+                    </div>
+                    {selectedHistorySummary?.cli_version ? (
+                      <div className="detail-row">
+                        <span className="detail-key">CLI version</span>
+                        <span className="detail-value">{selectedHistorySummary.cli_version}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </article>
             </div>
 
@@ -1379,7 +1435,7 @@ export default function App() {
               </div>
             </header>
 
-            <div className="chat-surface" ref={messagesRef}>
+            <div className="chat-surface chat-window" ref={messagesRef}>
               {selectedJob || selectedHistory ? (
                 selectedTranscriptMessages.map((message) => (
                   <article key={message.id} className={`message-card ${message.role}`}>

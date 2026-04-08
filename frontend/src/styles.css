@@ -46,6 +46,29 @@ body {
   color: var(--text);
 }
 
+.viewport-scroll-rail {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 14px;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid var(--border);
+  background: rgba(12, 12, 13, 0.88);
+  z-index: 40;
+}
+
+.viewport-scroll-input {
+  width: 12px;
+  height: calc(100vh - 24px);
+  margin: 12px 0;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  accent-color: var(--accent);
+}
+
 button,
 textarea,
 select {
@@ -85,6 +108,8 @@ textarea {
   grid-template-columns: 54px 300px minmax(0, 1fr);
   background: var(--bg-app);
   overflow: hidden;
+  margin-left: 14px;
+  width: calc(100% - 14px);
 }
 
 .activity-bar {
@@ -275,6 +300,17 @@ textarea {
   padding-bottom: 18px;
 }
 
+.thread-list-window {
+  max-height: calc(100vh - 290px);
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 65%),
+    var(--bg-panel);
+  box-shadow: var(--shadow);
+}
+
 .job-item {
   width: 100%;
   padding: 14px;
@@ -432,8 +468,8 @@ textarea {
   padding: 18px;
 }
 
-.stage-hero {
-  grid-row: span 2;
+.stage-card.collapsed {
+  min-height: auto;
 }
 
 .stage-output,
@@ -511,6 +547,10 @@ textarea {
   gap: 14px;
 }
 
+.chat-window {
+  max-height: calc(100vh - 250px);
+}
+
 .message-card {
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 14px;
@@ -561,6 +601,13 @@ textarea {
   margin-bottom: 10px;
 }
 
+.composer-toolbar .ghost-button,
+.composer-toolbar .panel-tab {
+  min-height: 22px;
+  padding: 2px 7px;
+  font-size: 0.7rem;
+}
+
 .history-banner {
   margin-bottom: 10px;
   padding: 10px 12px;
@@ -579,8 +626,8 @@ textarea {
 }
 
 .quick-action {
-  min-height: 26px;
-  padding: 3px 8px;
+  min-height: 22px;
+  padding: 2px 7px;
 }
 
 .composer-form {
@@ -613,6 +660,12 @@ textarea {
 
 .access-card {
   padding: 14px;
+}
+
+.collapse-button {
+  min-height: 24px;
+  padding: 3px 8px;
+  font-size: 0.72rem;
 }
 
 .checkbox-row {
@@ -742,11 +795,14 @@ textarea {
     border-bottom: 1px solid var(--border);
   }
 
-  .job-list,
   .editor-stage,
-  .chat-pane,
-  .chat-surface {
+  .chat-pane {
     overflow: visible;
+  }
+
+  .job-list,
+  .chat-surface {
+    overflow: auto;
   }
 
   .workbench,
@@ -762,6 +818,7 @@ textarea {
 
   .chat-surface {
     min-height: auto;
+    max-height: min(60vh, calc(100vh - 220px));
   }
 
   .composer-card {
@@ -815,6 +872,10 @@ textarea {
   .composer-actions {
     justify-content: flex-end;
     flex-wrap: wrap;
+  }
+
+  .thread-list-window {
+    max-height: min(44vh, calc(100vh - 220px));
   }
 
   .message-card.user,
