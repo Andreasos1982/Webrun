@@ -21,6 +21,7 @@ build/
 data/
 logs/
 .run/
+error.log
 
 frontend/node_modules/
 frontend/dist/

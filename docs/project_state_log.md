@@ -43,7 +43,34 @@ Practical consequence:
 - native thread activity such as `compacting` is now surfaced in the UI instead of being hidden in raw events
 - mobile scrolling was repaired
 - mobile composer controls were compacted
-- the current UI branch also contains pane/collapse work for the workspace console
+- the assistant response style in `webrun` was tuned to be clearer and less terse
+- the workspace UI now includes pane/collapse work for the workspace console
+
+### Local Git State
+
+Recent local commits include:
+
+- `372ba7b feat: surface native codex compaction state`
+- `ee064b8 feat: tune webrun assistant response style`
+- `310ee99 docs: add agent guide and project state log`
+- `a59d1f7 feat: add scroll panes to mobile chat layout`
+- `bbc79f7 fix: align mobile composer status row`
+- `f1f8918 fix: compact mobile composer controls`
+- `99ecc91 fix: restore mobile scrolling`
+- `311b772 feat: sync webrun chats with codex history`
+
+### GitHub Push Status
+
+- SSH authentication to GitHub works on this VPS for `Andreasos1982/CWB`
+- no git remote is configured in this repo yet
+- `git@github.com:Andreasos1982/webrun.git` does not exist yet
+- there is currently no GitHub API token or `gh` CLI login on the VPS, so repo creation cannot be completed automatically from this host alone
+
+### Export Preparation
+
+- the repo work is fully committed locally up through `372ba7b feat: surface native codex compaction state`
+- the local project log now tracks product changes, deployment state, and the GitHub export blocker
+- local runtime noise such as `error.log` is ignored so future commits stay focused on source changes
 
 ### Known Gaps
 
