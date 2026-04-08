@@ -12,6 +12,8 @@ class JobInputRequest(BaseModel):
     reasoning_effort: ReasoningEffort = ReasoningEffort.xhigh
     open_folder: str = Field(default=".", max_length=400)
     limit_to_open_folder: bool = False
+    thread_id: str | None = Field(default=None, max_length=120)
+    thread_title: str | None = Field(default=None, max_length=200)
 
     @field_validator("prompt")
     @classmethod
@@ -36,6 +38,22 @@ class JobInputRequest(BaseModel):
         if not folder or folder == "/":
             return "."
         return folder
+
+    @field_validator("thread_id")
+    @classmethod
+    def normalize_thread_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        thread_id = value.strip()
+        return thread_id or None
+
+    @field_validator("thread_title")
+    @classmethod
+    def normalize_thread_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        title = value.strip()
+        return title or None
 
 
 class CreateJobRequest(JobInputRequest):

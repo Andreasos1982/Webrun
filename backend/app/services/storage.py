@@ -35,6 +35,8 @@ class JobStore:
         reasoning_effort: ReasoningEffort,
         open_folder: str,
         limit_to_open_folder: bool,
+        thread_id: str | None = None,
+        title: str | None = None,
     ) -> JobRecord:
         now = utc_now()
         normalized_prompt = prompt.strip()
@@ -51,7 +53,7 @@ class JobStore:
         job = JobRecord(
             id=uuid4().hex[:12],
             prompt=normalized_prompt,
-            title=self._build_title(normalized_prompt),
+            title=title or self._build_title(normalized_prompt),
             mode=mode,
             model=model,
             reasoning_effort=reasoning_effort,
@@ -61,6 +63,11 @@ class JobStore:
             cwd=cwd,
             created_at=now,
             updated_at=now,
+            thread_id=thread_id,
+            thread_mode=mode if thread_id else None,
+            thread_cwd=cwd if thread_id else None,
+            thread_open_folder=open_folder if thread_id else None,
+            thread_limit_to_open_folder=limit_to_open_folder if thread_id else None,
             turn_count=1,
             messages=[first_message],
         )
@@ -82,6 +89,8 @@ class JobStore:
         cwd: str,
         open_folder: str,
         limit_to_open_folder: bool,
+        thread_id: str | None = None,
+        title: str | None = None,
     ) -> JobRecord:
         with self._lock:
             path = self._job_dir(job_id) / "job.json"
@@ -101,6 +110,8 @@ class JobStore:
             job.cwd = cwd
             job.open_folder = open_folder
             job.limit_to_open_folder = limit_to_open_folder
+            if title:
+                job.title = title
             job.status = JobStatus.queued
             job.error = None
             job.return_code = None
@@ -113,6 +124,12 @@ class JobStore:
             job.final_output = None
             job.updated_at = now
             job.turn_count = turn
+            if thread_id:
+                job.thread_id = thread_id
+                job.thread_mode = mode
+                job.thread_cwd = cwd
+                job.thread_open_folder = open_folder
+                job.thread_limit_to_open_folder = limit_to_open_folder
             job.messages.append(
                 ConversationMessage(
                     id=uuid4().hex,

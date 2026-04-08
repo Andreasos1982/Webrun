@@ -13,20 +13,19 @@ The repo now contains:
 - Detached disk-backed job workers
 - Persistent chat-style sessions with alternating user / Codex messages
 - Native Codex thread capture and resume when mode + workspace scope stay compatible
-- Read-only synced Codex history import through `codex app-server`
+- Synced Codex history and continuation through `codex app-server`
 - Built frontend served by FastAPI for single-origin production deploys
 - Persistent job metadata under `data/jobs/`
 - Readable logs in `output.log`
 - Raw Codex event capture in `events.jsonl`
 - WebSocket live streaming for the selected session, with polling fallback
-- A VS-Code-workbench-like browser surface with session explorer, workspace console, right-side Codex chat, folder chooser, model picker, reasoning picker, access picker, logs, and raw events
+- A VS-Code-workbench-like browser surface with synced thread explorer, workspace console, right-side Codex chat, folder chooser, model picker, reasoning picker, access picker, logs, and raw events
 
 ## Codex-Style Session UX
 
 The browser surface is now organized around a persistent session instead of a single one-off prompt:
 
-- left sidebar for sessions
-- second sidebar lane for synced Codex history
+- left sidebar for synced Codex threads
 - center workspace console with latest output, file changes, and thread state
 - right-side chat thread with alternating user and Codex messages
 - composer controls for:
@@ -46,14 +45,15 @@ Why this shape:
 
 ## Synced Codex History
 
-`webrun` can now surface read-only Codex threads that were created outside this app, matching the broader history visible in the Codex VS Code extension much more closely than a local `~/.codex/sessions` import would.
+`webrun` now treats synced Codex threads as the primary chat surface. New chats are started through the native app-server thread path, land in synced Codex history, and can then be reopened and continued from `webrun`, VS Code, or another device.
 
 Implementation notes:
 
 - backend bridges to the local experimental `codex app-server`
 - `thread/list` powers the synced history list
-- `thread/read` powers the read-only transcript view
-- imported history is intentionally read-only in `webrun` for now
+- `thread/read` powers the synced transcript view
+- `thread/start` creates new synced chats
+- `thread/resume` + `turn/start` continue existing synced chats without falling back to a local-only transcript
 
 Important caveat:
 

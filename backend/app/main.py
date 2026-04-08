@@ -240,6 +240,8 @@ def create_job(payload: CreateJobRequest) -> JobRecord:
         reasoning_effort=payload.reasoning_effort,
         open_folder=open_folder,
         limit_to_open_folder=payload.limit_to_open_folder,
+        thread_id=payload.thread_id,
+        title=payload.thread_title,
     )
     try:
         runner.start(job.id)
@@ -263,6 +265,8 @@ def append_job_message(job_id: str, payload: AppendMessageRequest) -> JobRecord:
         cwd=str(cwd),
         open_folder=open_folder,
         limit_to_open_folder=payload.limit_to_open_folder,
+        thread_id=payload.thread_id,
+        title=payload.thread_title,
     )
     try:
         runner.start(job.id)

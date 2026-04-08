@@ -7,7 +7,6 @@ import {
 } from "react";
 
 import {
-  appendMessage,
   cancelJob,
   createJob,
   fetchCodexHistoryThread,
@@ -85,6 +84,17 @@ function mergeJob(current: JobRecord[], nextJob: JobRecord): JobRecord[] {
   const next = current.filter((job) => job.id !== nextJob.id);
   next.push(nextJob);
   return sortJobs(next);
+}
+
+function findLatestJobForThread(
+  jobs: JobRecord[],
+  threadId: string | null,
+): JobRecord | null {
+  if (!threadId) {
+    return null;
+  }
+
+  return jobs.find((job) => job.thread_id === threadId) ?? null;
 }
 
 function getModeCapability(
@@ -210,15 +220,14 @@ export default function App() {
   const [folderBrowser, setFolderBrowser] = useState<FolderBrowserResponse | null>(null);
   const [folderLoading, setFolderLoading] = useState(false);
   const [folderError, setFolderError] = useState<string | null>(null);
-  const preserveNullSelectionRef = useRef(false);
-  const seededJobIdRef = useRef<string | null>(null);
+  const seededRunKeyRef = useRef<string | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const selectedJob =
-    selectionKind === "job"
-      ? jobs.find((job) => job.id === selectedJobId) ?? null
-      : null;
+  const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? null;
+  const selectedThreadRunJob = findLatestJobForThread(jobs, selectedHistoryThreadId);
+  const activeRunJob =
+    selectionKind === "history" ? selectedThreadRunJob : selectionKind === "job" ? selectedJob : null;
   const selectedHistorySummary =
     selectionKind === "history"
       ? historyThreads.find((thread) => thread.id === selectedHistoryThreadId) ??
@@ -229,30 +238,50 @@ export default function App() {
     historyDetail?.thread.id === selectedHistoryThreadId
       ? historyDetail
       : null;
-  const selectedTranscriptMessages = selectedJob?.messages ?? selectedHistory?.messages ?? [];
+  const selectedTranscriptMessages =
+    selectionKind === "history"
+      ? selectedHistory?.messages.length
+        ? selectedHistory.messages
+        : selectedThreadRunJob?.messages ?? []
+      : selectedJob?.messages ?? [];
   const selectedModeCapability = getModeCapability(runtime, mode);
-  const selectedJobCapability = selectedJob
-    ? getModeCapability(runtime, selectedJob.mode)
+  const selectedRunCapability = activeRunJob
+    ? getModeCapability(runtime, activeRunJob.mode)
     : null;
-  const selectedJobBusy = selectedJob ? isBusy(selectedJob.status) : false;
+  const selectedJobBusy = activeRunJob ? isBusy(activeRunJob.status) : false;
   const latestAssistant = latestTranscriptAssistantMessage(selectedTranscriptMessages);
-  const activeJobId = selectionKind === "job" ? selectedJobId : null;
+  const activeJobId = activeRunJob?.id ?? null;
   const canSubmit =
     Boolean(prompt.trim()) &&
     Boolean(model) &&
     Boolean(selectedModeCapability?.enabled) &&
-    selectionKind !== "history" &&
     !selectedJobBusy &&
     !submitting;
   const selectedTitle =
     selectedHistorySummary?.name ??
-    selectedJob?.title ??
+    activeRunJob?.title ??
     "New Codex session";
   const selectedSubtitle = selectedHistorySummary
-    ? `${selectedTranscriptMessages.length} messages • ${historySourceLabel(selectedHistorySummary.source)} history`
-    : selectedJob
-      ? `${selectedJob.messages.length} messages • ${selectedJob.turn_count} turns`
+    ? `${selectedTranscriptMessages.length} messages • ${historySourceLabel(selectedHistorySummary.source)} sync`
+    : activeRunJob
+      ? `${activeRunJob.messages.length} messages • ${activeRunJob.turn_count} turns`
       : "Alternating user and Codex messages stay visible here.";
+
+  async function refreshHistoryThreads() {
+    const response = await listCodexHistory(50);
+    startTransition(() => {
+      setHistoryThreads(response.threads);
+    });
+    setHistoryError(null);
+  }
+
+  async function refreshHistoryDetail(threadId: string) {
+    const response = await fetchCodexHistoryThread(threadId);
+    startTransition(() => {
+      setHistoryDetail(response);
+    });
+    setHistoryError(null);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -309,13 +338,7 @@ export default function App() {
         startTransition(() => {
           setJobs(sortJobs(response.jobs));
           setSelectedJobId((current) => {
-            if (current && response.jobs.some((job) => job.id === current)) {
-              return current;
-            }
-            if (current === null && preserveNullSelectionRef.current) {
-              return null;
-            }
-            return response.jobs[0]?.id ?? null;
+            return current && response.jobs.some((job) => job.id === current) ? current : null;
           });
         });
       } catch (requestError) {
@@ -343,17 +366,12 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
 
-    async function refreshHistory() {
+    async function syncHistory() {
       try {
-        const response = await listCodexHistory(50);
         if (cancelled) {
           return;
         }
-
-        startTransition(() => {
-          setHistoryThreads(response.threads);
-        });
-        setHistoryError(null);
+        await refreshHistoryThreads();
       } catch (requestError) {
         if (!cancelled) {
           setHistoryError(
@@ -365,9 +383,9 @@ export default function App() {
       }
     }
 
-    void refreshHistory();
+    void syncHistory();
     const intervalId = window.setInterval(() => {
-      void refreshHistory();
+      void syncHistory();
     }, 20000);
 
     return () => {
@@ -377,22 +395,34 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!selectedJob) {
-      return;
-    }
-    if (seededJobIdRef.current === selectedJob.id) {
+    if (!activeRunJob) {
       return;
     }
 
-    seededJobIdRef.current = selectedJob.id;
+    const seedKey = `${selectionKind}:${activeRunJob.id}`;
+    if (seededRunKeyRef.current === seedKey) {
+      return;
+    }
+
+    seededRunKeyRef.current = seedKey;
     startTransition(() => {
-      setMode(selectedJob.mode);
-      setModel(selectedJob.model);
-      setReasoningEffort(selectedJob.reasoning_effort);
-      setOpenFolder(selectedJob.open_folder || ".");
-      setLimitToOpenFolder(selectedJob.limit_to_open_folder);
+      setMode(activeRunJob.mode);
+      setModel(activeRunJob.model);
+      setReasoningEffort(activeRunJob.reasoning_effort);
+      setOpenFolder(activeRunJob.open_folder || ".");
+      setLimitToOpenFolder(activeRunJob.limit_to_open_folder);
     });
-  }, [selectedJob]);
+  }, [activeRunJob, selectionKind]);
+
+  useEffect(() => {
+    if (selectionKind !== "job" || !selectedJob?.thread_id) {
+      return;
+    }
+
+    setSelectionKind("history");
+    setSelectedHistoryThreadId(selectedJob.thread_id);
+    void refreshHistoryThreads();
+  }, [selectedJob, selectionKind]);
 
   useEffect(() => {
     if (selectionKind !== "history" || !selectedHistoryThreadId) {
@@ -403,17 +433,12 @@ export default function App() {
     let cancelled = false;
     setHistoryLoading(true);
 
-    async function loadHistoryDetail() {
+    async function syncHistoryDetail() {
       try {
-        const response = await fetchCodexHistoryThread(threadId);
         if (cancelled) {
           return;
         }
-
-        startTransition(() => {
-          setHistoryDetail(response);
-        });
-        setHistoryError(null);
+        await refreshHistoryDetail(threadId);
       } catch (requestError) {
         if (!cancelled) {
           setHistoryError(
@@ -429,12 +454,16 @@ export default function App() {
       }
     }
 
-    void loadHistoryDetail();
+    void syncHistoryDetail();
+    const intervalId = window.setInterval(() => {
+      void syncHistoryDetail();
+    }, selectedJobBusy ? 2500 : 12000);
 
     return () => {
       cancelled = true;
+      window.clearInterval(intervalId);
     };
-  }, [selectionKind, selectedHistoryThreadId]);
+  }, [selectedHistoryThreadId, selectedJobBusy, selectionKind]);
 
   useEffect(() => {
     if (!activeJobId) {
@@ -652,7 +681,13 @@ export default function App() {
       return;
     }
     messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
-  }, [selectionKind, selectedHistory?.messages.length, selectedJobId, selectedJob?.messages.length]);
+  }, [
+    selectionKind,
+    selectedHistory?.messages.length,
+    selectedHistoryThreadId,
+    activeRunJob?.messages.length,
+    activeRunJob?.updated_at,
+  ]);
 
   async function loadFolderBrowser(path: string) {
     setFolderLoading(true);
@@ -675,11 +710,11 @@ export default function App() {
   }
 
   function handleNewChat() {
-    preserveNullSelectionRef.current = true;
-    seededJobIdRef.current = "__new__";
+    seededRunKeyRef.current = "__new__";
     setSelectionKind("new");
     setSelectedJobId(null);
     setSelectedHistoryThreadId(null);
+    setHistoryDetail(null);
     setPrompt("");
     setError(null);
     setHistoryError(null);
@@ -697,16 +732,9 @@ export default function App() {
     promptRef.current?.focus();
   }
 
-  function handleSelectJob(jobId: string) {
-    preserveNullSelectionRef.current = false;
-    setSelectionKind("job");
-    setSelectedJobId(jobId);
-    setActivePanel("details");
-    setError(null);
-  }
-
   function handleSelectHistory(threadId: string) {
     setSelectionKind("history");
+    setSelectedJobId(null);
     setSelectedHistoryThreadId(threadId);
     setActivePanel("details");
     setError(null);
@@ -744,19 +772,23 @@ export default function App() {
         reasoning_effort: reasoningEffort,
         open_folder: openFolder,
         limit_to_open_folder: limitToOpenFolder,
+        thread_id: selectedHistoryThreadId,
+        thread_title: selectedHistorySummary?.name ?? null,
       };
 
-      const job = selectedJob
-        ? await appendMessage(selectedJob.id, payload)
-        : await createJob(payload);
-
-      preserveNullSelectionRef.current = false;
-      seededJobIdRef.current = job.id;
+      const job = await createJob(payload);
+      seededRunKeyRef.current = `${selectedHistoryThreadId ? "history" : "job"}:${job.id}`;
 
       startTransition(() => {
-        setSelectionKind("job");
         setJobs((current) => mergeJob(current, job));
-        setSelectedJobId(job.id);
+        if (job.thread_id) {
+          setSelectionKind("history");
+          setSelectedHistoryThreadId(job.thread_id);
+          setSelectedJobId(job.id);
+        } else {
+          setSelectionKind("job");
+          setSelectedJobId(job.id);
+        }
         setActivePanel("logs");
         if (!overridePrompt) {
           setPrompt("");
@@ -764,6 +796,7 @@ export default function App() {
           setPrompt("");
         }
       });
+      void refreshHistoryThreads();
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -781,7 +814,7 @@ export default function App() {
   }
 
   async function handleCancel() {
-    if (!selectedJob || cancelling) {
+    if (!activeRunJob || cancelling) {
       return;
     }
 
@@ -789,7 +822,7 @@ export default function App() {
     setError(null);
 
     try {
-      const job = await cancelJob(selectedJob.id);
+      const job = await cancelJob(activeRunJob.id);
       startTransition(() => {
         setJobs((current) => mergeJob(current, job));
         setActivePanel("logs");
@@ -868,52 +901,6 @@ export default function App() {
           <section className="sidebar-section grow">
             <div className="section-heading">
               <div>
-                <p className="section-label">Sessions</p>
-                <h2>WebRun Chats</h2>
-              </div>
-              <span className="section-count">{jobs.length}</span>
-            </div>
-
-            <div className="job-list">
-              {jobs.map((job) => {
-                const lastMessage = job.messages[job.messages.length - 1];
-                return (
-                  <button
-                    key={job.id}
-                    className={`job-item ${job.id === selectedJobId ? "selected" : ""}`}
-                    type="button"
-                    onClick={() => handleSelectJob(job.id)}
-                  >
-                    <div className="job-item-meta">
-                      <span className={`status-pill ${job.status}`}>{job.status}</span>
-                      <span className={`mode-pill ${job.mode}`}>{getAccessLabel(getModeCapability(runtime, job.mode))}</span>
-                    </div>
-                    <h3 className="job-item-title">{job.title || summarizeText(job.prompt)}</h3>
-                    <p className="job-item-prompt">
-                      {lastMessage ? summarizeText(lastMessage.content) : summarizeText(job.prompt)}
-                    </p>
-                    <div className="job-item-footer">
-                      <span className="job-item-time">{formatDate(job.updated_at)}</span>
-                      <span className="job-item-id">{job.open_folder}</span>
-                    </div>
-                  </button>
-                );
-              })}
-
-              {!jobs.length ? (
-                <div className="empty-card">
-                  <p className="section-label">No sessions yet</p>
-                  <p className="sidebar-copy">
-                    Start a new Codex chat and the transcript will persist here.
-                  </p>
-                </div>
-              ) : null}
-            </div>
-          </section>
-
-          <section className="sidebar-section grow">
-            <div className="section-heading">
-              <div>
                 <p className="section-label">Codex History</p>
                 <h2>Synced Threads</h2>
               </div>
@@ -961,6 +948,15 @@ export default function App() {
                   <p className="sidebar-copy">{historyError}</p>
                 </div>
               ) : null}
+
+              {!historyLoading && !historyError && !historyThreads.length ? (
+                <div className="empty-card">
+                  <p className="section-label">No synced threads yet</p>
+                  <p className="sidebar-copy">
+                    Start a new Codex chat and it will land directly in synced history.
+                  </p>
+                </div>
+              ) : null}
             </div>
           </section>
         </aside>
@@ -974,27 +970,20 @@ export default function App() {
                 <p className="title-copy">
                   {selectedHistorySummary
                     ? `${historySourceLabel(selectedHistorySummary.source)} thread • ${formatDate(selectedHistorySummary.updated_at)}`
-                    : selectedJob
-                      ? `Open folder ${selectedJob.open_folder} • ${formatDate(selectedJob.updated_at)}`
+                    : activeRunJob
+                      ? `Open folder ${activeRunJob.open_folder} • ${formatDate(activeRunJob.updated_at)}`
                       : "Select a session on the left or start a fresh chat."}
                 </p>
               </div>
               <div className="title-bar-meta">
-                <span className="message-chip">
-                  {selectedHistorySummary ? "Synced" : "Lokal"}
-                </span>
+                <span className="message-chip">{selectedHistorySummary ? "Synced" : "Draft"}</span>
+                <span className={`stream-pill ${streamState}`}>{streamLabel(streamState)}</span>
                 {selectedHistorySummary ? (
-                  <span className="message-chip">
-                    {historySourceLabel(selectedHistorySummary.source)}
-                  </span>
-                ) : (
-                  <span className={`stream-pill ${streamState}`}>{streamLabel(streamState)}</span>
-                )}
+                  <span className="message-chip">{historySourceLabel(selectedHistorySummary.source)}</span>
+                ) : null}
                 <span className="message-chip">
                   Thread{" "}
-                  {shortThreadId(
-                    selectedHistorySummary?.id ?? selectedJob?.thread_id ?? null,
-                  )}
+                  {shortThreadId(selectedHistorySummary?.id ?? activeRunJob?.thread_id ?? null)}
                 </span>
               </div>
             </header>
@@ -1011,11 +1000,11 @@ export default function App() {
                     <p className="section-label">Latest Assistant Message</p>
                     <h3>Codex output preview</h3>
                   </div>
-                  {selectedHistorySummary || selectedJob ? (
+                  {selectedHistorySummary || activeRunJob ? (
                     <span
-                      className={`status-pill ${selectedJob?.status ?? selectedHistorySummary?.status ?? ""}`}
+                      className={`status-pill ${activeRunJob?.status ?? selectedHistorySummary?.status ?? ""}`}
                     >
-                      {selectedJob?.status ?? selectedHistorySummary?.status}
+                      {activeRunJob?.status ?? selectedHistorySummary?.status}
                     </span>
                   ) : null}
                 </div>
@@ -1035,19 +1024,29 @@ export default function App() {
                 <div className="section-heading">
                   <div>
                     <p className="section-label">
-                      {selectedHistorySummary ? "History Source" : "Changed Files"}
+                      {activeRunJob?.changed_files.length ? "Changed Files" : "History Source"}
                     </p>
                     <h3>
-                      {selectedHistorySummary ? "Thread origin" : "Workspace delta"}
+                      {activeRunJob?.changed_files.length ? "Workspace delta" : "Thread origin"}
                     </h3>
                   </div>
                   <span className="section-count">
-                    {selectedHistorySummary
-                      ? historySourceLabel(selectedHistorySummary.source)
-                      : selectedJob?.changed_files.length ?? 0}
+                    {activeRunJob?.changed_files.length
+                      ? activeRunJob.changed_files.length
+                      : selectedHistorySummary
+                        ? historySourceLabel(selectedHistorySummary.source)
+                        : 0}
                   </span>
                 </div>
-                {selectedHistorySummary ? (
+                {activeRunJob?.changed_files.length ? (
+                  <div className="file-list">
+                    {activeRunJob.changed_files.map((file) => (
+                      <div key={file} className="file-item">
+                        <code>{file}</code>
+                      </div>
+                    ))}
+                  </div>
+                ) : selectedHistorySummary ? (
                   <div className="detail-list">
                     <div className="detail-row">
                       <span className="detail-key">Source</span>
@@ -1072,17 +1071,9 @@ export default function App() {
                       </span>
                     </div>
                   </div>
-                ) : selectedJob?.changed_files.length ? (
-                  <div className="file-list">
-                    {selectedJob.changed_files.map((file) => (
-                      <div key={file} className="file-item">
-                        <code>{file}</code>
-                      </div>
-                    ))}
-                  </div>
                 ) : (
                   <p className="sidebar-copy">
-                    No file changes recorded for this session yet.
+                    No file changes or synced thread metadata available yet.
                   </p>
                 )}
               </article>
@@ -1090,92 +1081,86 @@ export default function App() {
               <article className="stage-card">
                 <div className="section-heading">
                   <div>
-                    <p className="section-label">
-                      {selectedHistorySummary ? "Thread State" : "Thread State"}
-                    </p>
-                    <h3>
-                      {selectedHistorySummary ? "Imported history" : "Native resume context"}
-                    </h3>
+                    <p className="section-label">Thread State</p>
+                    <h3>Native resume context</h3>
                   </div>
-                  {selectedHistorySummary ? (
-                    <span className="message-chip">Read-only</span>
-                  ) : selectedJobCapability?.dangerous ? (
+                  {selectedRunCapability?.dangerous ? (
                     <span className="danger-pill">Full access</span>
                   ) : null}
                 </div>
                 <div className="detail-list">
-                  {selectedHistorySummary ? (
-                    <>
-                      <div className="detail-row">
-                        <span className="detail-key">Status</span>
-                        <span className="detail-value">{selectedHistorySummary.status}</span>
-                      </div>
-                      <div className="detail-row">
-                        <span className="detail-key">Created</span>
-                        <span className="detail-value">
-                          {formatDate(selectedHistorySummary.created_at)}
-                        </span>
-                      </div>
-                      <div className="detail-row">
-                        <span className="detail-key">Updated</span>
-                        <span className="detail-value">
-                          {formatDate(selectedHistorySummary.updated_at)}
-                        </span>
-                      </div>
-                      <div className="detail-row">
-                        <span className="detail-key">CLI Version</span>
-                        <span className="detail-value">
-                          {selectedHistorySummary.cli_version ?? "n/a"}
-                        </span>
-                      </div>
-                      <div className="detail-row">
-                        <span className="detail-key">Thread Id</span>
-                        <span className="detail-value">
-                          {shortThreadId(selectedHistorySummary.id)}
-                        </span>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="detail-row">
-                        <span className="detail-key">Mode</span>
-                        <span className="detail-value">{selectedJob?.mode ?? mode}</span>
-                      </div>
-                      <div className="detail-row">
-                        <span className="detail-key">Open folder</span>
-                        <span className="detail-value">
-                          {selectedJob?.open_folder ?? openFolder}
-                        </span>
-                      </div>
-                      <div className="detail-row">
-                        <span className="detail-key">Limit scope</span>
-                        <span className="detail-value">
-                          {(selectedJob?.limit_to_open_folder ?? limitToOpenFolder)
-                            ? "Enabled"
-                            : "Disabled"}
-                        </span>
-                      </div>
-                      <div className="detail-row">
-                        <span className="detail-key">Native thread</span>
-                        <span className="detail-value">
-                          {shortThreadId(selectedJob?.thread_id ?? null)}
-                        </span>
-                      </div>
-                      <div className="detail-row">
-                        <span className="detail-key">Executor</span>
-                        <span className="detail-value">{selectedJob?.executor ?? "pending"}</span>
-                      </div>
-                      <div className="detail-row">
-                        <span className="detail-key">Return code</span>
-                        <span className="detail-value">
-                          {selectedJob?.return_code === null ||
-                          selectedJob?.return_code === undefined
-                            ? "n/a"
-                            : selectedJob.return_code}
-                        </span>
-                      </div>
-                    </>
-                  )}
+                  <div className="detail-row">
+                    <span className="detail-key">Status</span>
+                    <span className="detail-value">
+                      {activeRunJob?.status ?? selectedHistorySummary?.status ?? "draft"}
+                    </span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-key">Source</span>
+                    <span className="detail-value">
+                      {selectedHistorySummary
+                        ? historySourceLabel(selectedHistorySummary.source)
+                        : "New synced chat"}
+                    </span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-key">Created</span>
+                    <span className="detail-value">
+                      {selectedHistorySummary
+                        ? formatDate(selectedHistorySummary.created_at)
+                        : activeRunJob
+                          ? formatDate(activeRunJob.created_at)
+                          : "Not started"}
+                    </span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-key">Updated</span>
+                    <span className="detail-value">
+                      {selectedHistorySummary
+                        ? formatDate(selectedHistorySummary.updated_at)
+                        : activeRunJob
+                          ? formatDate(activeRunJob.updated_at)
+                          : "n/a"}
+                    </span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-key">Native thread</span>
+                    <span className="detail-value">
+                      {shortThreadId(selectedHistorySummary?.id ?? activeRunJob?.thread_id ?? null)}
+                    </span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-key">Open folder</span>
+                    <span className="detail-value">
+                      {activeRunJob?.open_folder ?? openFolder}
+                    </span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-key">Limit scope</span>
+                    <span className="detail-value">
+                      {(activeRunJob?.limit_to_open_folder ?? limitToOpenFolder)
+                        ? "Enabled"
+                        : "Disabled"}
+                    </span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-key">Executor</span>
+                    <span className="detail-value">{activeRunJob?.executor ?? "pending"}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-key">Return code</span>
+                    <span className="detail-value">
+                      {activeRunJob?.return_code === null || activeRunJob?.return_code === undefined
+                        ? "n/a"
+                        : activeRunJob.return_code}
+                    </span>
+                  </div>
+                  {selectedHistorySummary?.cli_version ? (
+                    <div className="detail-row">
+                      <span className="detail-key">CLI version</span>
+                      <span className="detail-value">{selectedHistorySummary.cli_version}</span>
+                    </div>
+                  ) : null}
                 </div>
               </article>
             </div>
@@ -1184,17 +1169,11 @@ export default function App() {
               <section className="access-card">
                 <div className="mode-card-top">
                   <div>
-                    <p className="section-label">
-                      {selectedHistorySummary ? "History" : "Access"}
-                    </p>
-                    <h3>
-                      {selectedHistorySummary
-                        ? "Synced Codex transcript"
-                        : getAccessLabel(selectedModeCapability)}
-                    </h3>
+                    <p className="section-label">Access</p>
+                    <h3>{getAccessLabel(selectedModeCapability)}</h3>
                   </div>
                   <div className="title-bar-meta">
-                    {!selectedHistorySummary && selectedModeCapability ? (
+                    {selectedModeCapability ? (
                       <span className={`mode-state ${selectedModeCapability.mode}`}>
                         {selectedModeCapability.launch_strategy}
                       </span>
@@ -1204,58 +1183,37 @@ export default function App() {
                         {historySourceLabel(selectedHistorySummary.source)}
                       </span>
                     ) : null}
-                    {!selectedHistorySummary && selectedModeCapability?.dangerous ? (
+                    {selectedModeCapability?.dangerous ? (
                       <span className="danger-pill">Host-wide</span>
                     ) : null}
                   </div>
                 </div>
                 <p className="sidebar-copy">
                   {selectedHistorySummary
-                    ? "This transcript is mirrored from Codex account history through the local app-server bridge. It is read-only in WebRun for now."
+                    ? `Continuing synced thread from ${historySourceLabel(selectedHistorySummary.source)}. ${getAccessDescription(selectedModeCapability)}`
                     : getAccessDescription(selectedModeCapability)}
                 </p>
-                {selectedHistorySummary ? (
-                  <div className="detail-list compact-detail-list">
-                    <div className="detail-row">
-                      <span className="detail-key">Source</span>
-                      <span className="detail-value">
-                        {historySourceLabel(selectedHistorySummary.source)}
-                      </span>
-                    </div>
-                    <div className="detail-row">
-                      <span className="detail-key">CWD</span>
-                      <span className="detail-value">{selectedHistorySummary.cwd || "n/a"}</span>
-                    </div>
-                    <div className="detail-row">
-                      <span className="detail-key">Path</span>
-                      <span className="detail-value">{selectedHistorySummary.path || "n/a"}</span>
-                    </div>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={limitToOpenFolder}
+                    onChange={(event) => setLimitToOpenFolder(event.target.checked)}
+                  />
+                  <span>Limit to the open folder</span>
+                </label>
+                <div className="scope-row">
+                  <div>
+                    <span className="runtime-key">Open folder</span>
+                    <p className="runtime-value">{openFolder}</p>
                   </div>
-                ) : (
-                  <>
-                    <label className="checkbox-row">
-                      <input
-                        type="checkbox"
-                        checked={limitToOpenFolder}
-                        onChange={(event) => setLimitToOpenFolder(event.target.checked)}
-                      />
-                      <span>Limit to the open folder</span>
-                    </label>
-                    <div className="scope-row">
-                      <div>
-                        <span className="runtime-key">Open folder</span>
-                        <p className="runtime-value">{openFolder}</p>
-                      </div>
-                      <button
-                        className="ghost-button"
-                        type="button"
-                        onClick={() => void openFolderDialog()}
-                      >
-                        Change
-                      </button>
-                    </div>
-                  </>
-                )}
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => void openFolderDialog()}
+                  >
+                    Change
+                  </button>
+                </div>
               </section>
 
               <section className="panel-surface">
@@ -1272,42 +1230,50 @@ export default function App() {
                       </button>
                     ))}
                   </div>
-                  {selectedJob ? (
-                    <span className={`status-pill ${selectedJob.status}`}>{selectedJob.status}</span>
+                  {activeRunJob ? (
+                    <span className={`status-pill ${activeRunJob.status}`}>{activeRunJob.status}</span>
+                  ) : selectedHistorySummary ? (
+                    <span className="status-pill">{selectedHistorySummary.status}</span>
                   ) : null}
                 </div>
 
                 <div className="panel-body">
                   {activePanel === "logs" ? (
                     <pre className="terminal-output">
-                      {selectedHistorySummary
-                        ? "WebRun logs are only available for sessions started inside this app."
-                        : logs || "No logs yet."}
+                      {activeRunJob
+                        ? logs || "No logs yet."
+                        : selectedHistorySummary
+                          ? "Open or continue this synced thread in WebRun to generate runner logs."
+                          : "No logs yet."}
                     </pre>
                   ) : null}
                   {activePanel === "events" ? (
                     <pre className="terminal-output">
-                      {selectedHistorySummary
-                        ? "Codex history imports do not expose WebRun event streams."
-                        : events || "No events yet."}
+                      {activeRunJob
+                        ? events || "No events yet."
+                        : selectedHistorySummary
+                          ? "Open or continue this synced thread in WebRun to generate runner events."
+                          : "No events yet."}
                     </pre>
                   ) : null}
                   {activePanel === "details" ? (
                     <div className="detail-list">
                       <div className="detail-row">
-                        <span className="detail-key">
-                          {selectedHistorySummary ? "Thread" : "Session"}
-                        </span>
+                        <span className="detail-key">Thread</span>
                         <span className="detail-value">
-                          {selectedHistorySummary?.id ?? selectedJob?.id ?? "new"}
+                          {selectedHistorySummary?.id ?? activeRunJob?.thread_id ?? "new"}
                         </span>
+                      </div>
+                      <div className="detail-row">
+                        <span className="detail-key">Run id</span>
+                        <span className="detail-value">{activeRunJob?.id ?? "n/a"}</span>
                       </div>
                       <div className="detail-row">
                         <span className="detail-key">
                           {selectedHistorySummary ? "Provider" : "Model"}
                         </span>
                         <span className="detail-value">
-                          {selectedHistorySummary?.model_provider ?? selectedJob?.model ?? model}
+                          {selectedHistorySummary?.model_provider ?? activeRunJob?.model ?? model}
                         </span>
                       </div>
                       <div className="detail-row">
@@ -1317,7 +1283,7 @@ export default function App() {
                         <span className="detail-value">
                           {selectedHistorySummary
                             ? historySourceLabel(selectedHistorySummary.source)
-                            : selectedJob?.reasoning_effort ?? reasoningEffort}
+                            : activeRunJob?.reasoning_effort ?? reasoningEffort}
                         </span>
                       </div>
                       <div className="detail-row">
@@ -1325,8 +1291,8 @@ export default function App() {
                         <span className="detail-value">
                           {selectedHistorySummary
                             ? formatDate(selectedHistorySummary.created_at)
-                            : selectedJob
-                              ? formatDate(selectedJob.created_at)
+                            : activeRunJob
+                              ? formatDate(activeRunJob.created_at)
                               : "Not started"}
                         </span>
                       </div>
@@ -1335,8 +1301,8 @@ export default function App() {
                         <span className="detail-value">
                           {selectedHistorySummary
                             ? formatDate(selectedHistorySummary.updated_at)
-                            : selectedJob
-                              ? formatDate(selectedJob.updated_at)
+                            : activeRunJob
+                              ? formatDate(activeRunJob.updated_at)
                               : "n/a"}
                         </span>
                       </div>
@@ -1345,13 +1311,13 @@ export default function App() {
                           {selectedHistorySummary ? "CWD" : "Open folder"}
                         </span>
                         <span className="detail-value">
-                          {selectedHistorySummary?.cwd ?? selectedJob?.open_folder ?? openFolder}
+                          {selectedHistorySummary?.cwd ?? activeRunJob?.open_folder ?? openFolder}
                         </span>
                       </div>
                       <div className="detail-row">
                         <span className="detail-key">Native thread</span>
                         <span className="detail-value">
-                          {shortThreadId(selectedHistorySummary?.id ?? selectedJob?.thread_id ?? null)}
+                          {shortThreadId(selectedHistorySummary?.id ?? activeRunJob?.thread_id ?? null)}
                         </span>
                       </div>
                       <div className="detail-row">
@@ -1360,7 +1326,7 @@ export default function App() {
                         </span>
                         <span className="detail-value">
                           {selectedHistorySummary?.path ??
-                            selectedJob?.thread_open_folder ??
+                            activeRunJob?.thread_open_folder ??
                             "not established"}
                         </span>
                       </div>
@@ -1371,17 +1337,17 @@ export default function App() {
                         <span className="detail-value">
                           {selectedHistorySummary
                             ? selectedHistorySummary.cli_version ?? "n/a"
-                            : (selectedJob?.thread_limit_to_open_folder ?? limitToOpenFolder)
+                            : (activeRunJob?.thread_limit_to_open_folder ?? limitToOpenFolder)
                               ? "Enabled"
                               : "Disabled"}
                         </span>
                       </div>
-                      {selectedHistorySummary ? null : (
+                      {activeRunJob ? (
                         <div className="detail-row">
                           <span className="detail-key">Worker PID</span>
-                          <span className="detail-value">{selectedJob?.worker_pid ?? "n/a"}</span>
+                          <span className="detail-value">{activeRunJob.worker_pid ?? "n/a"}</span>
                         </div>
-                      )}
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
@@ -1466,13 +1432,6 @@ export default function App() {
             </div>
 
             <section className="composer-card">
-              {selectedHistorySummary ? (
-                <div className="history-banner">
-                  This Codex history thread is read-only in WebRun for now. Start a new chat
-                  to continue work inside this app.
-                </div>
-              ) : null}
-
               <div className="composer-toolbar">
                 <div className="quick-action-row">
                   {QUICK_ACTIONS.map((action) => (
@@ -1484,7 +1443,6 @@ export default function App() {
                       disabled={
                         submitting ||
                         selectedJobBusy ||
-                        selectionKind === "history" ||
                         !selectedModeCapability?.enabled
                       }
                     >
@@ -1496,7 +1454,6 @@ export default function App() {
                   className="ghost-button"
                   type="button"
                   onClick={() => void openFolderDialog()}
-                  disabled={selectionKind === "history"}
                 >
                   Choose Folder
                 </button>
@@ -1509,7 +1466,6 @@ export default function App() {
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
                   rows={6}
-                  disabled={selectionKind === "history"}
                   placeholder="Describe the next coding task, ask for a review, or continue the thread..."
                 />
 
@@ -1519,7 +1475,6 @@ export default function App() {
                     <select
                       value={model}
                       onChange={(event) => setModel(event.target.value)}
-                      disabled={selectionKind === "history"}
                     >
                       {runtime?.available_models.map((option) => (
                         <option key={option.id} value={option.id}>
@@ -1533,7 +1488,6 @@ export default function App() {
                     <span className="field-label">Denkaufwand</span>
                     <select
                       value={reasoningEffort}
-                      disabled={selectionKind === "history"}
                       onChange={(event) =>
                         setReasoningEffort(event.target.value as ReasoningEffort)
                       }
@@ -1550,7 +1504,6 @@ export default function App() {
                     <span className="field-label">Zugriff</span>
                     <select
                       value={mode}
-                      disabled={selectionKind === "history"}
                       onChange={(event) => setMode(event.target.value as JobMode)}
                     >
                       {runtime?.modes.map((option) => (
@@ -1564,7 +1517,9 @@ export default function App() {
 
                 <div className="composer-footer">
                   <div className="status-bar">
-                    <span className="message-chip">Lokal</span>
+                    <span className="message-chip">
+                      {selectedHistorySummary ? "Synced thread" : "New synced thread"}
+                    </span>
                     <span className={`stream-pill ${streamState}`}>{streamLabel(streamState)}</span>
                     {runtime?.supports_native_thread_resume ? (
                       <span className="message-chip">Native resume</span>
@@ -1587,11 +1542,7 @@ export default function App() {
                       type="submit"
                       disabled={!canSubmit}
                     >
-                      {selectionKind === "history"
-                        ? "History is read-only"
-                        : selectedJob
-                          ? "Send Follow-up"
-                          : "Start Chat"}
+                      {selectionKind === "history" ? "Send Follow-up" : "Start Chat"}
                     </button>
                   </div>
                 </div>

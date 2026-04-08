@@ -8,6 +8,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
 from typing import Literal
 
 from .config import get_settings
@@ -15,11 +16,11 @@ from .models import ConversationMessage, JobRecord, JobStatus, MessageRole
 from .services.modes import (
     ModeSpec,
     build_exec_command,
-    build_resume_command,
     build_review_command,
     get_mode_spec,
     supports_native_resume,
 )
+from .services.codex_history import CodexAppServerClient, CodexAppServerError
 from .services.snapshot import WorkspaceSnapshotBuilder
 from .services.storage import JobStore, utc_now
 
@@ -119,15 +120,26 @@ class JobWorker:
         self.store.append_log(job.id, f"[user] {latest_user_message.content}")
 
         try:
-            prompt = self._build_prompt(job, mode_spec, parsed_turn, should_resume)
-            self._run_codex(
-                job,
-                prompt,
-                current_turn=current_turn,
-                allow_thread_update=parsed_turn.kind == "chat" and not should_resume,
-            )
+            if parsed_turn.kind == "chat":
+                self._run_synced_chat_turn(
+                    job,
+                    mode_spec,
+                    parsed_turn,
+                    current_turn=current_turn,
+                    should_resume=should_resume,
+                )
+            else:
+                prompt = self._build_prompt(job, mode_spec, parsed_turn, should_resume)
+                self._run_codex(
+                    job,
+                    prompt,
+                    current_turn=current_turn,
+                    allow_thread_update=False,
+                )
         except FileNotFoundError:
             self._fail_job(job, "The `codex` CLI was not found on this machine.")
+        except CodexAppServerError as exc:
+            self._fail_job(job, f"Codex app-server failed: {exc}")
         except Exception as exc:  # noqa: BLE001
             self._fail_job(job, f"Job failed unexpectedly: {exc}")
 
@@ -190,16 +202,10 @@ class JobWorker:
                 model=job.model,
                 reasoning_effort=job.reasoning_effort,
             )
-        if should_resume and job.thread_id:
-            resume_command = build_resume_command(
-                self.settings,
-                job.mode,
-                model=job.model,
-                reasoning_effort=job.reasoning_effort,
-                thread_id=job.thread_id,
-            )
-            if resume_command:
-                return resume_command
+        if parsed_turn.kind == "chat":
+            if should_resume and job.thread_id:
+                return [self.settings.codex_bin, "app-server", "thread/resume", job.thread_id]
+            return [self.settings.codex_bin, "app-server", "thread/start"]
         return build_exec_command(
             self.settings,
             job.mode,
@@ -212,9 +218,221 @@ class JobWorker:
             return "codex-review"
         if turn_kind in {"local", "cloud"}:
             return f"session-{turn_kind}"
-        if should_resume:
-            return f"{mode_spec.executor}-resume"
+        if turn_kind == "chat":
+            return "codex-app-server-resume" if should_resume else "codex-app-server-start"
         return mode_spec.executor
+
+    def _build_thread_instructions(self, job: JobRecord, mode_spec: ModeSpec, parsed_turn: ParsedTurn) -> str:
+        open_folder_line = f"Open folder: {job.open_folder} ({job.cwd})"
+        folder_guardrail = ""
+        if job.limit_to_open_folder:
+            folder_guardrail = (
+                "Treat the open folder as the only allowed work area. "
+                "Do not read or write outside it unless the user explicitly changes scope.\n"
+            )
+
+        if mode_spec.launch_strategy == "snapshot":
+            snapshot = WorkspaceSnapshotBuilder(Path(job.cwd)).build(parsed_turn.prompt)
+            self.store.append_log(job.id, "[system] Built bounded workspace snapshot")
+            self.store.append_log(job.id, f"[system] Snapshot characters: {len(snapshot)}")
+            return (
+                "You are Codex running inside a browser-based VPS runner.\n"
+                "This thread is synchronized with the user's Codex history.\n"
+                "You are in strict read-only mode for this turn.\n"
+                "Do not call shell tools, MCP tools, or web search.\n"
+                "Answer only from the workspace snapshot below.\n"
+                "If the snapshot is insufficient, say exactly what is missing.\n\n"
+                f"{open_folder_line}\n"
+                f"{folder_guardrail}\n"
+                f"Workspace snapshot:\n{snapshot}\n"
+            )
+
+        self.store.append_log(
+            job.id,
+            "[system] Live workspace mode enabled: Codex may inspect the repository directly.",
+        )
+        return (
+            "You are Codex running inside a browser-based VPS runner.\n"
+            "This thread is synchronized with the user's Codex history.\n"
+            "You may inspect and edit files in the live workspace when necessary.\n"
+            "Stay focused on the user's latest request, keep changes minimal and deliberate, and summarize what you changed.\n\n"
+            f"{open_folder_line}\n"
+            f"{folder_guardrail}"
+        )
+
+    def _app_server_sandbox_mode(self, mode_spec: ModeSpec) -> str:
+        if mode_spec.bypass_sandbox:
+            return "danger-full-access"
+        if mode_spec.sandbox_mode:
+            return mode_spec.sandbox_mode
+        return "read-only"
+
+    def _run_synced_chat_turn(
+        self,
+        job: JobRecord,
+        mode_spec: ModeSpec,
+        parsed_turn: ParsedTurn,
+        *,
+        current_turn: int,
+        should_resume: bool,
+    ) -> None:
+        self.store.append_log(job.id, "[system] Using native Codex synced thread transport.")
+        developer_instructions = self._build_thread_instructions(job, mode_spec, parsed_turn)
+
+        final_output: str | None = None
+        changed_files: set[str] = set()
+        thread_id = job.thread_id if should_resume else None
+        turn_id: str | None = None
+        turn_completed = False
+        turn_error: str | None = None
+        thread_idle = False
+        idle_observed_at: float | None = None
+
+        with CodexAppServerClient(self.settings, timeout_seconds=30.0) as client:
+            self._active_process = client.process
+
+            if should_resume and job.thread_id:
+                thread_result = client.request(
+                    "thread/resume",
+                    {
+                        "threadId": job.thread_id,
+                        "model": job.model,
+                        "cwd": job.cwd,
+                        "approvalPolicy": "never",
+                        "sandbox": self._app_server_sandbox_mode(mode_spec),
+                        "developerInstructions": developer_instructions,
+                        "persistExtendedHistory": True,
+                    },
+                )
+                thread_id = thread_result.get("thread", {}).get("id") or job.thread_id
+                self.store.append_log(job.id, f"[system] Resumed synced Codex thread: {thread_id}")
+            else:
+                thread_result = client.request(
+                    "thread/start",
+                    {
+                        "model": job.model,
+                        "cwd": job.cwd,
+                        "approvalPolicy": "never",
+                        "sandbox": self._app_server_sandbox_mode(mode_spec),
+                        "developerInstructions": developer_instructions,
+                        "ephemeral": False,
+                        "experimentalRawEvents": False,
+                        "persistExtendedHistory": True,
+                    },
+                )
+                thread_id = thread_result.get("thread", {}).get("id") or thread_id
+                self.store.append_log(job.id, f"[system] Started synced Codex thread: {thread_id}")
+
+            def handle_message(message: dict) -> None:
+                nonlocal final_output, thread_id, turn_completed, turn_error, turn_id, thread_idle, idle_observed_at
+                payload = json.dumps(message, ensure_ascii=False)
+                self.store.append_event(job.id, payload)
+                rendered = self._render_event(payload, cwd=job.cwd)
+                if rendered.log_line:
+                    self.store.append_log(job.id, rendered.log_line)
+                if rendered.final_output:
+                    final_output = rendered.final_output
+                if rendered.changed_files:
+                    changed_files.update(rendered.changed_files)
+                if rendered.thread_id:
+                    thread_id = rendered.thread_id
+
+                if message.get("method") == "turn/completed":
+                    params = message.get("params") or {}
+                    completed_turn = params.get("turn") or {}
+                    turn_error = completed_turn.get("error") or turn_error
+                    if not turn_id or completed_turn.get("id") == turn_id:
+                        turn_completed = True
+                elif message.get("method") == "thread/status/changed":
+                    params = message.get("params") or {}
+                    status = params.get("status") or {}
+                    status_type = status.get("type") if isinstance(status, dict) else status
+                    if status_type == "idle":
+                        thread_idle = True
+                        idle_observed_at = time.monotonic()
+                    else:
+                        thread_idle = False
+                        idle_observed_at = None
+
+            turn_request_id = client.send_request(
+                "turn/start",
+                {
+                    "threadId": thread_id,
+                    "input": [
+                        {
+                            "type": "text",
+                            "text": parsed_turn.prompt,
+                            "text_elements": [],
+                        }
+                    ],
+                    "cwd": job.cwd,
+                    "approvalPolicy": "never",
+                    "model": job.model,
+                    "effort": job.reasoning_effort.value,
+                },
+            )
+            turn_result = client.wait_for_response(
+                turn_request_id,
+                timeout_seconds=60.0,
+                on_message=handle_message,
+            )
+            turn_id = turn_result.get("turn", {}).get("id")
+
+            while not turn_completed:
+                message = client.read_message(timeout_seconds=0.5)
+                if message is None:
+                    if (
+                        thread_idle
+                        and idle_observed_at is not None
+                        and time.monotonic() - idle_observed_at >= 0.75
+                        and (final_output is not None or turn_error is not None)
+                    ):
+                        turn_completed = True
+                    continue
+                handle_message(message)
+
+        self._active_process = None
+
+        completed_job = self.store.get_job(job.id)
+        completed_job.return_code = 0 if not turn_error else 1
+        completed_job.finished_at = utc_now()
+        completed_job.updated_at = completed_job.finished_at
+        completed_job.final_output = final_output
+        completed_job.changed_files = sorted(changed_files)
+
+        if self._cancel_requested or completed_job.cancel_requested_at:
+            completed_job.status = JobStatus.cancelled
+            completed_job.error = None
+            self.store.append_log(job.id, "[system] Turn cancelled")
+            self.store.save_job(completed_job)
+            return
+
+        completed_job.thread_id = thread_id or completed_job.thread_id
+        completed_job.thread_mode = completed_job.mode
+        completed_job.thread_cwd = completed_job.cwd
+        completed_job.thread_open_folder = completed_job.open_folder
+        completed_job.thread_limit_to_open_folder = completed_job.limit_to_open_folder
+
+        completed_job.status = JobStatus.succeeded if not turn_error else JobStatus.failed
+        completed_job.error = turn_error
+        if final_output and not self._turn_has_assistant_message(completed_job, current_turn):
+            completed_job.messages.append(
+                ConversationMessage(
+                    id=os.urandom(8).hex(),
+                    role=MessageRole.assistant,
+                    content=final_output,
+                    created_at=completed_job.finished_at,
+                    turn=current_turn,
+                    mode=completed_job.mode,
+                    model=completed_job.model,
+                    reasoning_effort=completed_job.reasoning_effort,
+                )
+            )
+        if turn_error:
+            self.store.append_log(job.id, f"[error] {turn_error}")
+        else:
+            self.store.append_log(job.id, "[system] Job finished successfully")
+        self.store.save_job(completed_job)
 
     def _build_prompt(self, job: JobRecord, mode_spec: ModeSpec, parsed_turn: ParsedTurn, should_resume: bool) -> str:
         latest_request = parsed_turn.prompt
@@ -481,7 +699,12 @@ class JobWorker:
                 return RenderedEvent()
             return RenderedEvent(log_line=f"[raw] {raw_line}")
 
+        if "method" in event:
+            return self._render_app_server_event(event, cwd=cwd)
+
         event_type = event.get("type")
+        if event.get("id") is not None and "result" in event:
+            return RenderedEvent()
         if event_type == "thread.started":
             return RenderedEvent(
                 log_line=f"[system] Codex thread started: {event.get('thread_id')}",
@@ -530,6 +753,80 @@ class JobWorker:
             server = item.get("server") or "unknown"
             tool = item.get("tool") or "unknown"
             return RenderedEvent(log_line=f"[tool] {server}/{tool}")
+
+        return RenderedEvent(log_line=f"[event] Completed {item_type}")
+
+    def _render_app_server_event(self, event: dict, cwd: str) -> RenderedEvent:
+        method = event.get("method")
+        params = event.get("params") or {}
+
+        if method == "thread/started":
+            thread = params.get("thread") or {}
+            thread_id = thread.get("id")
+            return RenderedEvent(
+                log_line=f"[system] Synced Codex thread started: {thread_id}",
+                thread_id=thread_id,
+            )
+
+        if method == "thread/name/updated":
+            return RenderedEvent(log_line=f"[system] Thread name updated: {params.get('threadName') or 'untitled'}")
+
+        if method == "thread/status/changed":
+            status = params.get("status") or {}
+            if isinstance(status, dict):
+                status = status.get("type")
+            return RenderedEvent(log_line=f"[system] Thread status: {status or 'unknown'}")
+
+        if method == "turn/started":
+            return RenderedEvent(log_line="[system] Codex turn started")
+
+        if method == "turn/completed":
+            turn = params.get("turn") or {}
+            return RenderedEvent(log_line=f"[system] Codex turn completed ({turn.get('status') or 'completed'})")
+
+        if method in {"item/agentMessage/delta", "item/reasoning/textDelta", "item/reasoning/summaryTextDelta"}:
+            return RenderedEvent()
+
+        if method in {"item/commandExecution/outputDelta", "command/exec/outputDelta"}:
+            delta = params.get("delta")
+            if isinstance(delta, str) and delta:
+                return RenderedEvent(log_line=delta.rstrip("\n"))
+            return RenderedEvent()
+
+        if method != "item/completed":
+            return RenderedEvent()
+
+        item = params.get("item") or {}
+        item_type = item.get("type")
+
+        if item_type == "agentMessage":
+            text = (item.get("text") or "").strip()
+            if not text:
+                return RenderedEvent(log_line="[assistant] <empty response>")
+            return RenderedEvent(log_line=f"[assistant]\n{text}", final_output=text)
+
+        if item_type in {"fileChange", "file_change"}:
+            changes = item.get("changes") or []
+            changed_files = tuple(self._display_path(change.get("path"), cwd) for change in changes if change.get("path"))
+            if not changed_files:
+                return RenderedEvent(log_line="[files] Completed file change")
+            preview = ", ".join(changed_files[:4])
+            if len(changed_files) > 4:
+                preview += ", ..."
+            return RenderedEvent(
+                log_line=f"[files] Updated {len(changed_files)} file(s): {preview}",
+                changed_files=changed_files,
+            )
+
+        if item_type == "userMessage":
+            return RenderedEvent()
+
+        if item_type == "reasoning":
+            return RenderedEvent(log_line="[system] Codex reasoning completed")
+
+        if item_type == "commandExecution":
+            title = item.get("title") or "command"
+            return RenderedEvent(log_line=f"[command] {title}")
 
         return RenderedEvent(log_line=f"[event] Completed {item_type}")
 

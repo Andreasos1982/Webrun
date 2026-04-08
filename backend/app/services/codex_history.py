@@ -6,7 +6,7 @@ from pathlib import Path
 import select
 import subprocess
 import time
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import HTTPException
 
@@ -69,7 +69,11 @@ class CodexAppServerClient:
                 "clientInfo": {
                     "name": "webrun",
                     "version": "0.1.0",
-                }
+                },
+                "capabilities": {
+                    "experimentalApi": True,
+                    "optOutNotificationMethods": [],
+                },
             },
         )
         return self
@@ -92,6 +96,10 @@ class CodexAppServerClient:
         self._process = None
 
     def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        request_id = self.send_request(method, params)
+        return self.wait_for_response(request_id)
+
+    def send_request(self, method: str, params: dict[str, Any]) -> int:
         process = self._require_process()
         request_id = self._next_id()
         payload = {
@@ -105,7 +113,55 @@ class CodexAppServerClient:
             raise CodexAppServerError("Codex history transport did not open stdin.")
         process.stdin.write(json.dumps(payload) + "\n")
         process.stdin.flush()
-        return self._read_result(request_id)
+        return request_id
+
+    @property
+    def process(self) -> subprocess.Popen[str]:
+        return self._require_process()
+
+    def read_message(self, timeout_seconds: float | None = None) -> dict[str, Any] | None:
+        process = self._require_process()
+        if process.stdout is None:
+            raise CodexAppServerError("Codex history transport did not open stdout.")
+
+        timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        readable, _, _ = select.select([process.stdout], [], [], timeout)
+        if not readable:
+            return None
+
+        raw_line = process.stdout.readline()
+        if not raw_line:
+            raise CodexAppServerError("Codex history transport exited unexpectedly.")
+
+        try:
+            return json.loads(raw_line)
+        except json.JSONDecodeError:
+            return None
+
+    def wait_for_response(
+        self,
+        request_id: int,
+        *,
+        timeout_seconds: float | None = None,
+        on_message: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + (timeout_seconds or self.timeout_seconds)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CodexAppServerError("Codex history request timed out.")
+
+            message = self.read_message(timeout_seconds=remaining)
+            if message is None:
+                continue
+
+            if on_message is not None:
+                on_message(message)
+
+            if message.get("id") != request_id:
+                continue
+
+            return self._extract_result(request_id, message)
 
     def _require_process(self) -> subprocess.Popen[str]:
         if self._process is None:
@@ -116,45 +172,19 @@ class CodexAppServerClient:
         self._next_request_id += 1
         return self._next_request_id
 
-    def _read_result(self, request_id: int) -> dict[str, Any]:
-        process = self._require_process()
-        if process.stdout is None:
-            raise CodexAppServerError("Codex history transport did not open stdout.")
+    def _extract_result(self, request_id: int, message: dict[str, Any]) -> dict[str, Any]:
+        if "error" in message:
+            error = message["error"]
+            if isinstance(error, dict):
+                detail = _normalize_text(error.get("message"))
+            else:
+                detail = _normalize_text(error)
+            raise CodexAppServerError(detail or f"Codex history request {request_id} failed.")
 
-        deadline = time.monotonic() + self.timeout_seconds
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise CodexAppServerError("Codex history request timed out.")
-
-            readable, _, _ = select.select([process.stdout], [], [], remaining)
-            if not readable:
-                continue
-
-            raw_line = process.stdout.readline()
-            if not raw_line:
-                raise CodexAppServerError("Codex history transport exited unexpectedly.")
-
-            try:
-                message = json.loads(raw_line)
-            except json.JSONDecodeError:
-                continue
-
-            if message.get("id") != request_id:
-                continue
-
-            if "error" in message:
-                error = message["error"]
-                if isinstance(error, dict):
-                    detail = _normalize_text(error.get("message"))
-                else:
-                    detail = _normalize_text(error)
-                raise CodexAppServerError(detail or f"Codex history request {request_id} failed.")
-
-            result = message.get("result")
-            if not isinstance(result, dict):
-                raise CodexAppServerError("Codex history transport returned an invalid payload.")
-            return result
+        result = message.get("result")
+        if not isinstance(result, dict):
+            raise CodexAppServerError("Codex history transport returned an invalid payload.")
+        return result
 
 
 class CodexHistoryService:
@@ -171,6 +201,7 @@ class CodexHistoryService:
         params: dict[str, Any] = {
             "limit": limit,
             "sortKey": "updated_at",
+            "sourceKinds": ["vscode", "cli", "appServer"],
         }
         if cursor:
             params["cursor"] = cursor
@@ -231,7 +262,7 @@ class CodexHistoryService:
             "preview": preview,
             "created_at": _normalize_timestamp(thread.get("createdAt")),
             "updated_at": _normalize_timestamp(thread.get("updatedAt")),
-            "status": _normalize_text(thread.get("status")) or "unknown",
+            "status": self._normalize_status(thread.get("status")),
             "source": _normalize_text(thread.get("source")) or "unknown",
             "cwd": _normalize_text(thread.get("cwd")) or "",
             "model_provider": _normalize_text(thread.get("modelProvider")),
@@ -351,3 +382,10 @@ class CodexHistoryService:
             return Path(path).stem or "Codex thread"
 
         return "Codex thread"
+
+    def _normalize_status(self, value: Any) -> str:
+        if isinstance(value, dict):
+            status_type = _normalize_text(value.get("type"))
+            if status_type:
+                return status_type
+        return _normalize_text(value) or "unknown"

@@ -59,6 +59,8 @@ export interface CreateJobRequest {
   reasoning_effort: ReasoningEffort;
   open_folder: string;
   limit_to_open_folder: boolean;
+  thread_id?: string | null;
+  thread_title?: string | null;
 }
 
 export interface AppendMessageRequest {
@@ -68,6 +70,8 @@ export interface AppendMessageRequest {
   reasoning_effort: ReasoningEffort;
   open_folder: string;
   limit_to_open_folder: boolean;
+  thread_id?: string | null;
+  thread_title?: string | null;
 }
 
 export interface LogsResponse {
