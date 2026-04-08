@@ -222,6 +222,19 @@ class JobWorker:
             return "codex-app-server-resume" if should_resume else "codex-app-server-start"
         return mode_spec.executor
 
+    def _assistant_style_instructions(self) -> str:
+        return (
+            "Communication style:\n"
+            "- Match the user's language unless they explicitly ask to switch.\n"
+            "- Sound like a pragmatic, collaborative senior engineer.\n"
+            "- Be warm and clear, but not fluffy or theatrical.\n"
+            "- Do not be overly terse. Unless the user asks for brevity, give a compact but complete answer.\n"
+            "- Explain important reasoning and tradeoffs explicitly when they matter.\n"
+            "- State assumptions clearly when you have to make them.\n"
+            "- If you changed code or behavior, summarize the change and the concrete outcome.\n"
+            "- When something is blocked or uncertain, say so directly and explain what is missing.\n"
+        )
+
     def _build_thread_instructions(self, job: JobRecord, mode_spec: ModeSpec, parsed_turn: ParsedTurn) -> str:
         open_folder_line = f"Open folder: {job.open_folder} ({job.cwd})"
         folder_guardrail = ""
@@ -242,6 +255,7 @@ class JobWorker:
                 "Do not call shell tools, MCP tools, or web search.\n"
                 "Answer only from the workspace snapshot below.\n"
                 "If the snapshot is insufficient, say exactly what is missing.\n\n"
+                f"{self._assistant_style_instructions()}\n"
                 f"{open_folder_line}\n"
                 f"{folder_guardrail}\n"
                 f"Workspace snapshot:\n{snapshot}\n"
@@ -256,6 +270,7 @@ class JobWorker:
             "This thread is synchronized with the user's Codex history.\n"
             "You may inspect and edit files in the live workspace when necessary.\n"
             "Stay focused on the user's latest request, keep changes minimal and deliberate, and summarize what you changed.\n\n"
+            f"{self._assistant_style_instructions()}\n"
             f"{open_folder_line}\n"
             f"{folder_guardrail}"
         )
@@ -449,6 +464,7 @@ class JobWorker:
             return (
                 f"{open_folder_line}\n"
                 f"{folder_guardrail}"
+                f"{self._assistant_style_instructions()}\n"
                 "Focus on behavioral regressions, risks, and missing tests. Keep findings first.\n\n"
                 f"Custom review instructions:\n{latest_request}\n"
             )
@@ -461,6 +477,7 @@ class JobWorker:
                 return (
                     "Continue the existing Codex session.\n"
                     "This turn remains strict read-only.\n"
+                    f"{self._assistant_style_instructions()}\n"
                     f"{open_folder_line}\n"
                     "Use only the snapshot below.\n\n"
                     f"User request:\n{latest_request}\n\n"
@@ -473,6 +490,7 @@ class JobWorker:
                 "Do not call shell tools, MCP tools, or web search.\n"
                 "Answer only from the workspace snapshot below and the conversation transcript.\n"
                 "If the snapshot is insufficient, say exactly what is missing.\n\n"
+                f"{self._assistant_style_instructions()}\n"
                 f"{open_folder_line}\n\n"
                 f"Session transcript:\n{transcript}\n\n"
                 f"Workspace snapshot:\n{snapshot}\n"
@@ -485,6 +503,7 @@ class JobWorker:
         if should_resume:
             return (
                 "Continue the existing Codex session.\n"
+                f"{self._assistant_style_instructions()}\n"
                 f"{open_folder_line}\n"
                 f"{folder_guardrail}"
                 f"User request:\n{latest_request}\n"
@@ -495,6 +514,7 @@ class JobWorker:
             "You may inspect and edit files in the live workspace when necessary.\n"
             "Stay focused on the user's latest request, keep changes minimal and deliberate, and summarize what you changed.\n"
             "Do not assume browser state is persistent; job logs and final output are surfaced in a web UI.\n\n"
+            f"{self._assistant_style_instructions()}\n"
             f"{open_folder_line}\n"
             f"{folder_guardrail}\n"
             f"Session transcript:\n{transcript}\n"
